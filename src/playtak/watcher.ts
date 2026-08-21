@@ -75,7 +75,7 @@ function formatSeconds(totalSeconds: number): string {
 
 function timeSuffix(state: WatchState): string {
   if (state.whiteSeconds === undefined || state.blackSeconds === undefined) return '';
-  return ` (Time left: ${formatSeconds(state.whiteSeconds)}W, ${formatSeconds(state.blackSeconds)}B)`;
+  return `\nTime left: ${formatSeconds(state.whiteSeconds)}W, ${formatSeconds(state.blackSeconds)}B`;
 }
 
 async function closeThread(thread: ThreadChannel): Promise<void> {
@@ -86,7 +86,7 @@ async function closeThread(thread: ThreadChannel): Promise<void> {
 }
 
 async function postBoard(state: WatchState, content?: string): Promise<void> {
-  const png = renderBoardPng(state.boardSize, state.komi, state.plies);
+  const png = renderBoardPng(state.boardSize, state.komi, state.plies, state.white, state.black);
   await state.thread.send({
     ...(content ? { content } : {}),
     files: [{ attachment: png, name: 'board.png' }],
@@ -190,10 +190,13 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
       return;
     }
 
-    const player = state.plies.length % 2 === 0 ? state.white : state.black;
+    const ply = state.plies.length;
+    const player = ply % 2 === 0 ? state.white : state.black;
+    const moveNumber = Math.floor(ply / 2) + 1;
+    const colorLetter = ply % 2 === 0 ? 'W' : 'B';
     state.plies.push(ptn);
     try {
-      await postBoard(state, `**${player}**: ${ptn}${timeSuffix(state)}`);
+      await postBoard(state, `**${player}**: ${moveNumber}${colorLetter}: ${ptn}${timeSuffix(state)}`);
     } catch (err) {
       console.error(`Failed to post move to thread for game #${event.gameNo}:`, err);
     }

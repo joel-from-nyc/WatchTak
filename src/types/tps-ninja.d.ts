@@ -19,6 +19,9 @@ declare module 'tps-ninja' {
     // Highlights the squares touched by this ply without re-applying it -
     // `tps` should already reflect the position after the move.
     hl?: string;
+    // Shown next to the flat count on each side of the board header.
+    player1?: string;
+    player2?: string;
   }
 
   export interface TakCanvas {

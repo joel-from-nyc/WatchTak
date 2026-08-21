@@ -6,11 +6,20 @@ import { PTNtoTPS, TPStoPNG } from 'tps-ninja';
 // buffer. Passing a dummy PassThrough as tps-ninja's `streamTo` argument
 // prevents its default behavior of writing a file to disk as a side effect
 // (see TPStoPNG.js) - we only want the in-memory buffer.
-export function renderBoardPng(boardSize: number, komi: number, plies: string[]): Buffer {
+export function renderBoardPng(
+  boardSize: number,
+  komi: number,
+  plies: string[],
+  white: string,
+  black: string,
+): Buffer {
   const tps = PTNtoTPS({ size: boardSize, plies });
   const lastPly = plies[plies.length - 1];
   const sink = new PassThrough();
   sink.on('data', () => {});
-  const canvas = TPStoPNG({ tps, komi, imageSize: 'sm', hl: lastPly }, sink);
+  const canvas = TPStoPNG(
+    { tps, komi, imageSize: 'sm', hl: lastPly, player1: white, player2: black },
+    sink,
+  );
   return canvas.toBuffer();
 }
