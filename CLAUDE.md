@@ -14,8 +14,9 @@ in-memory session store have been removed. `/ping` is the only piece that
 survived from the original scaffold.
 
 ## Current state
-Slash commands (registered guild-scoped for fast iteration during
-development):
+Slash commands (registered guild-scoped for near-instant updates - each
+bot instance only ever lives in one Discord server; testing happens on a
+separate instance, not a second server on the same process):
 - `/ping` — health check.
 - `/list` (alias `/l`) — lists PlayTak games currently in progress.
 - `/watch <game>` (alias `/w`) — watches a live PlayTak game: opens (or
@@ -79,10 +80,12 @@ development):
 - Only one PlayTak connection should ever be open (`initPlaytak()`'s
   singleton) — new features should subscribe to it, not open another.
 - This bot is currently developed and tested on the user's own
-  private/trusted Discord server. It will move to the "Tak Talk" Discord
-  server once features are further along - don't assume Tak Talk is the
+  private/trusted Discord server. It will eventually move to the "Tak Talk"
+  Discord server and live there exclusively - don't assume Tak Talk is the
   current target, and give that community a heads-up before pointing a
-  persistent connection at PlayTak from there.
+  persistent connection at PlayTak from there. Testing after that point
+  happens via a separate bot instance, not by running the same instance in
+  two servers at once.
 - Eventual hosting target is the user's Dreamhost shell space; for now it
   just runs locally via `npm run dev`.
 
@@ -90,8 +93,8 @@ development):
 - Don't commit or print real token/secret values anywhere, including in
   commit messages, logs, or comments.
 - Don't register commands globally (omit `DISCORD_GUILD_ID`) unless asked —
-  guild-scoped registration is faster for iteration and is what's expected
-  during this development phase.
+  guild-scoped registration is faster for iteration and is what's expected,
+  since a bot instance only ever lives in one server.
 - Never send anything to PlayTak that creates or affects a game (no seeks,
   no moves, no account actions) — this bot is read-only against PlayTak by
   design, which matters both technically and for staying a good citizen of

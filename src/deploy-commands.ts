@@ -33,9 +33,11 @@ const commands = [
 const rest = new REST().setToken(DISCORD_TOKEN);
 
 async function main() {
-  // Guild-scoped registration shows up instantly - great for development.
-  // Global registration (no guild ID) can take up to an hour to propagate,
-  // but makes the commands available in every server the bot is in.
+  // Guild-scoped registration shows up instantly - each bot instance only
+  // ever lives in one Discord server (a separate test instance runs
+  // separately from the production one), so there's no need for global
+  // registration's "works in every server" tradeoff of up to an hour to
+  // propagate.
   const route = DISCORD_GUILD_ID
     ? Routes.applicationGuildCommands(DISCORD_CLIENT_ID!, DISCORD_GUILD_ID)
     : Routes.applicationCommands(DISCORD_CLIENT_ID!);
@@ -43,6 +45,15 @@ async function main() {
   console.log(`Registering ${commands.length} command(s)...`);
   await rest.put(route, { body: commands });
   console.log('Commands registered successfully.');
+
+  // Clear any leftover global registration from before the switch back to
+  // guild-scoped - otherwise they'd sit alongside the new guild-scoped ones
+  // and show up twice.
+  if (DISCORD_GUILD_ID) {
+    console.log('Clearing old global commands...');
+    await rest.put(Routes.applicationCommands(DISCORD_CLIENT_ID!), { body: [] });
+    console.log('Old global commands cleared.');
+  }
 }
 
 main().catch((err) => {

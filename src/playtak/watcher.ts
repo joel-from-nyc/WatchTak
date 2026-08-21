@@ -48,6 +48,8 @@ interface WatchState {
   historyMode: 'newThread' | 'resume';
 }
 
+// One bot instance only ever lives in one Discord server, so a game is only
+// ever watched from one place - keyed by PlayTak game number alone.
 const activeWatches = new Map<number, WatchState>();
 
 function threadName(white: string, black: string, gameNo: number): string {
@@ -109,7 +111,9 @@ async function handleGameEnd(
     result,
     plies: state.plies,
   });
-  await state.thread.send(`**Game over.** ${resultText}\n${ptnLink}`).catch(() => {});
+  // Angle brackets suppress Discord's link-preview embed, leaving just the
+  // clickable link.
+  await state.thread.send(`**Game over.** ${resultText}\n<${ptnLink}>`).catch(() => {});
   await scheduleClose(state.thread);
 
   activeWatches.delete(state.gameNo);
@@ -183,13 +187,32 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
   });
 }
 
+// Re-fetches the thread from Discord to confirm it's still real - `fetch()`
+// throws if it's been deleted, and a manually-archived thread (as opposed to
+// one this bot archived itself on game end) shouldn't be silently reused.
+async function isThreadUsable(thread: ThreadChannel): Promise<boolean> {
+  try {
+    const fresh = await thread.fetch();
+    return !fresh.archived;
+  } catch {
+    return false;
+  }
+}
+
 export async function watchGame(
   playtak: PlaytakClient,
   parentChannel: TextChannel,
   game: GameListEntry,
 ): Promise<{ thread: ThreadChannel; alreadyWatching: boolean }> {
   const existing = activeWatches.get(game.gameNo);
-  if (existing) return { thread: existing.thread, alreadyWatching: true };
+  if (existing) {
+    if (await isThreadUsable(existing.thread)) {
+      return { thread: existing.thread, alreadyWatching: true };
+    }
+    if (existing.settleTimer) clearTimeout(existing.settleTimer);
+    activeWatches.delete(game.gameNo);
+    playtak.send(`Unobserve ${game.gameNo}`);
+  }
 
   const thread = await parentChannel.threads.create({
     name: threadName(game.white, game.black, game.gameNo),
