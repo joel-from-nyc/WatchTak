@@ -1,7 +1,7 @@
 {
   "name": "discord-bot-poc",
   "version": "0.1.0",
-  "description": "Proof-of-concept Discord bot with slash commands and a webhook server for interop with external websites/apps.",
+  "description": "Discord bot for the Tak board game / PlayTak.com community - browse seeks, list games, and watch a live game in a thread.",
   "main": "dist/index.js",
   "type": "commonjs",
   "scripts": {
@@ -13,12 +13,16 @@
   "dependencies": {
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",
-    "express": "^4.21.1"
+    "tps-ninja": "^1.1.25",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
-    "@types/express": "^4.17.21",
     "@types/node": "^22.9.0",
+    "@types/ws": "^8.18.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.6.3"
+  },
+  "allowScripts": {
+    "canvas@3.2.3": true
   }
 }

@@ -1,12 +1,20 @@
 import { Client, GatewayIntentBits, Collection, ChatInputCommandInteraction } from 'discord.js';
 import dotenv from 'dotenv';
 import * as ping from './commands/ping';
-import * as launch from './commands/launch';
-import { startWebhookServer } from './server';
+import * as list from './commands/list';
+import * as watch from './commands/watch';
+import * as help from './commands/help';
+import * as seeks from './commands/seeks';
+import * as s from './commands/s';
+import * as seek from './commands/seek';
+import * as l from './commands/l';
+import * as w from './commands/w';
+import { initPlaytak } from './playtak/shared';
+import { registerWatcher } from './playtak/watcher';
 
 dotenv.config();
 
-const { DISCORD_TOKEN, WEBHOOK_PORT, WEBHOOK_SECRET } = process.env;
+const { DISCORD_TOKEN } = process.env;
 
 if (!DISCORD_TOKEN) {
   throw new Error('DISCORD_TOKEN must be set in .env');
@@ -25,16 +33,20 @@ interface Command {
 
 const commands = new Collection<string, Command>();
 commands.set(ping.data.name, ping);
-commands.set(launch.data.name, launch);
+commands.set(list.data.name, list);
+commands.set(watch.data.name, watch);
+commands.set(help.data.name, help);
+commands.set(seeks.data.name, seeks);
+commands.set(s.data.name, s);
+commands.set(seek.data.name, seek);
+commands.set(l.data.name, l);
+commands.set(w.data.name, w);
 
 client.once('ready', (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
 
-  // Start the webhook server once we're connected, since it needs the
-  // client to actually post messages.
-  const port = Number(WEBHOOK_PORT ?? 3000);
-  const secret = WEBHOOK_SECRET ?? 'change-me';
-  startWebhookServer(client, port, secret);
+  const { client: playtak, gameRegistry } = initPlaytak();
+  registerWatcher(playtak, readyClient, gameRegistry);
 });
 
 client.on('interactionCreate', async (interaction) => {

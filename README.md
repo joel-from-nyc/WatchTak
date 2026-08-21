@@ -1,12 +1,15 @@
-# Discord Bot Proof of Concept
+# NokBot — Tak/PlayTak Discord Bot
 
-A TypeScript Discord bot (discord.js) with two commands and a small webhook
-server, showing both directions of interop with an external website:
+A TypeScript Discord bot (discord.js) for the abstract board game Tak and
+the [PlayTak.com](https://playtak.com) community. It keeps a single
+read-only guest connection to PlayTak open and bridges it into Discord:
+browsing open seeks and in-progress games, and watching a specific game
+live in a thread as it's played, with board images and PTN notation.
 
-- **Discord → Website**: `/launch` starts a "game session" and returns a join link
-  (currently faked locally — swap in a real `fetch` call to your site's API).
-- **Website → Discord**: a webhook endpoint (`POST /events/session-update`) lets
-  your website push updates back into the Discord channel that started the session.
+The bot never writes anything to PlayTak — no seeks, no moves, no account
+actions. It only listens to the public seek/game-list broadcasts every
+guest connection receives, and (when someone runs `/watch`) subscribes to
+one game's move stream to mirror it into Discord.
 
 ## Setup
 
@@ -14,25 +17,31 @@ server, showing both directions of interop with an external website:
    - Go to https://discord.com/developers/applications → New Application.
    - Under "Bot", click "Reset Token" and copy it — this is `DISCORD_TOKEN`.
    - Copy the "Application ID" from General Information — this is `DISCORD_CLIENT_ID`.
-   - Under "Bot", enable the intents you need (none required beyond default for this POC).
+   - Under Installation, if the app is private (not a Public Bot), set the
+     default Install Link to "None".
 
 2. **Install dependencies**
    ```bash
    npm install
    ```
+   This pulls in `tps-ninja` (board image rendering), which depends on the
+   native `canvas` package. If its install script isn't auto-approved by
+   npm, run `npm install-scripts approve canvas`.
 
 3. **Configure environment**
    ```bash
    cp .env.example .env
    ```
-   Fill in `DISCORD_TOKEN` and `DISCORD_CLIENT_ID`. For fast local testing, also
-   set `DISCORD_GUILD_ID` to your test server's ID (right-click the server icon
-   with Developer Mode on in Discord settings → Advanced).
+   Fill in `DISCORD_TOKEN` and `DISCORD_CLIENT_ID`. For fast local testing,
+   also set `DISCORD_GUILD_ID` to your test server's ID (right-click the
+   server icon with Developer Mode on in Discord settings → Advanced).
 
 4. **Invite the bot to your server**
    Build an invite URL in the Developer Portal under OAuth2 → URL Generator:
    - Scopes: `bot`, `applications.commands`
-   - Bot permissions: `Send Messages`, `Read Message History` (add more as needed)
+   - Bot permissions: `Send Messages`, `Read Message History`, `Create Public Threads`,
+     `Send Messages in Threads`, `Manage Threads` (needed to archive/lock
+     watch threads when a game ends)
    Open the generated URL and add the bot to your test server.
 
 5. **Register the slash commands**
@@ -45,44 +54,54 @@ server, showing both directions of interop with an external website:
    ```bash
    npm run dev
    ```
-   You should see `Logged in as YourBot#1234` and `Webhook server listening on port 3000`.
+   You should see `Logged in as YourBot#1234`.
 
 7. **Try it**
-   - In Discord, run `/ping` and `/launch`.
-   - `/launch` will print a fake join URL and a session ID.
-   - Simulate your website calling back in with an update:
-     ```bash
-     curl -X POST http://localhost:3000/events/session-update \
-       -H "Content-Type: application/json" \
-       -H "x-webhook-secret: change-me-to-something-random" \
-       -d '{"sessionId": "PASTE_SESSION_ID_HERE", "message": "A second player joined!"}'
-     ```
-     That message should appear in the Discord channel where you ran `/launch`.
+   - `/ping` — health check.
+   - `/seeks` (or `/s`, `/seek`) — see what public seeks are open right now.
+   - `/list` (or `/l`) — see what games are currently in progress.
+   - `/watch <game>` (or `/w`) — pass a game ID or a player name (partial
+     names work) to open a thread and follow that game live. Leave it blank
+     to behave like `/list`.
 
 ## Project structure
 
 ```
 src/
-  index.ts           # Bot entry point: logs in, wires up commands, starts webhook server
-  server.ts          # Express server for website -> Discord updates
-  sessionStore.ts     # In-memory map of game session ID -> Discord channel
-  deploy-commands.ts  # One-off script to register slash commands with Discord
+  index.ts               # Bot entry point: logs in, wires up commands and the PlayTak connection
+  deploy-commands.ts     # One-off script to register slash commands with Discord
   commands/
-    ping.ts           # Basic health-check command
-    launch.ts          # Starts a session and returns a join link
+    ping.ts               # Health-check command
+    list.ts, l.ts          # List in-progress PlayTak games (+ alias)
+    watch.ts, w.ts          # Watch a game live in a thread (+ alias)
+    seeks.ts, s.ts, seek.ts # List open public seeks (+ aliases)
+    help.ts                # Full command/alias explanations
+  playtak/
+    client.ts             # The single guest WebSocket connection to PlayTak
+    protocol.ts            # Wire-protocol parser -> typed events
+    shared.ts               # Singleton wiring the connection + registries together
+    registry.ts, seekRegistry.ts  # Live in-memory views of active games / open seeks
+    gamesReply.ts, seeksReply.ts  # Shared reply text builders for the commands above
+    watcher.ts              # Thread lifecycle: create/reuse, live moves, reconnect, sweep
+    ptn.ts, ptnLink.ts, result.ts, boardImage.ts  # Notation, links, results, board rendering
+  scripts/
+    playtak-probe.ts, playtak-client-probe.ts  # Standalone protocol-debugging scripts
+  types/
+    tps-ninja.d.ts          # Ambient types for the untyped tps-ninja package
 ```
 
 ## Where to go from here
 
-- **Real website integration**: replace the fake session creation in `launch.ts`
-  with an actual `fetch` call to your site's API, and have your site call the
-  webhook endpoint in `server.ts` for real events (player joined, game ended, etc.).
-- **Persistence**: swap `sessionStore.ts`'s in-memory `Map` for Redis or a database
-  so sessions survive a bot restart and work across multiple bot instances.
-- **Webhook security**: the shared-secret header is fine for a proof of concept;
-  for production consider HMAC-signed payloads (like Stripe/GitHub webhooks).
-- **Deployment**: once it works locally, host it on a small VPS, Railway, or Fly.io
-  so it stays online. If your website and bot are hosted separately, make sure
-  the webhook URL is reachable from your website's server (not `localhost`).
-- **More commands**: add new files in `src/commands/`, import and register them
-  in both `index.ts` and `deploy-commands.ts`.
+- **Move to Tak Talk**: this bot is currently developed and tested on a
+  private Discord server. Once it's solid, invite it to the Tak Talk
+  Discord server (worth giving the community a heads-up first, since it's
+  a small community and guest connections are meant for humans).
+- **Deployment**: currently runs locally via `npm run dev`. The plan is to
+  eventually host it on Dreamhost shell space instead.
+- **playtak-ui deep links**: PlayTak has no shareable join/spectate URLs
+  today. A small PR to `USTakAssociation/playtak-ui` adding `?game=`/`?seek=`
+  deep links would let `/watch` and future features link straight to a game
+  instead of just narrating it.
+- **Separate project idea**: a small web app teaching new players Tak,
+  embedding PTN Ninja's board via its documented `postMessage` API. Not
+  part of this repo.

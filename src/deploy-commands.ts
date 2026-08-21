@@ -1,7 +1,14 @@
 import { REST, Routes } from 'discord.js';
 import dotenv from 'dotenv';
 import * as ping from './commands/ping';
-import * as launch from './commands/launch';
+import * as list from './commands/list';
+import * as watch from './commands/watch';
+import * as help from './commands/help';
+import * as seeks from './commands/seeks';
+import * as s from './commands/s';
+import * as seek from './commands/seek';
+import * as l from './commands/l';
+import * as w from './commands/w';
 
 dotenv.config();
 
@@ -11,7 +18,17 @@ if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID) {
   throw new Error('DISCORD_TOKEN and DISCORD_CLIENT_ID must be set in .env');
 }
 
-const commands = [ping.data.toJSON(), launch.data.toJSON()];
+const commands = [
+  ping.data.toJSON(),
+  list.data.toJSON(),
+  watch.data.toJSON(),
+  help.data.toJSON(),
+  seeks.data.toJSON(),
+  s.data.toJSON(),
+  seek.data.toJSON(),
+  l.data.toJSON(),
+  w.data.toJSON(),
+];
 
 const rest = new REST().setToken(DISCORD_TOKEN);
 

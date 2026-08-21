@@ -1,44 +1,63 @@
-# Project: Discord Bot (proof of concept → real bot)
+# Project: NokBot — Tak/PlayTak Discord companion bot
 
 ## What this is
-A Discord bot in TypeScript (discord.js v14) that will eventually let users
-run commands that either return information or trigger actions. The main
-interesting piece: two Discord users should be able to launch a session on
-an external website (e.g. a game) via a bot command, and the website should
-be able to push updates back into the Discord channel.
+A Discord bot (TypeScript, discord.js v14) built around the abstract board
+game Tak and the PlayTak.com community. It maintains a single read-only
+guest connection to PlayTak and bridges it into Discord: browsing open
+seeks and in-progress games, and watching a specific game live in a
+dedicated thread as it's played, with board images and PTN notation.
+
+This started as a generic "launch a session on an external website" proof
+of concept. That direction was abandoned in favor of the PlayTak
+integration - the old `/launch` command, its webhook server, and its
+in-memory session store have been removed. `/ping` is the only piece that
+survived from the original scaffold.
 
 ## Current state
-A proof of concept already exists in this repo:
-- `/ping` — trivial health check command
-- `/launch` — creates a fake session ID + join URL locally (no real website
-  yet) and stores a mapping of sessionId -> Discord channel in
-  `src/sessionStore.ts` (in-memory, wiped on restart)
-- `src/server.ts` — an Express server the bot runs alongside the Discord
-  client. It exposes `POST /events/session-update` so an external website
-  can push a message into the channel tied to a session ID. Auth is a
-  single shared secret in the `x-webhook-secret` header (fine for now, not
-  production-grade).
+Slash commands (registered guild-scoped for fast iteration during
+development):
+- `/ping` — health check.
+- `/list` (alias `/l`) — lists PlayTak games currently in progress.
+- `/watch <game>` (alias `/w`) — watches a live PlayTak game: opens (or
+  reuses) a Discord thread, posts the board plus each move in PTN notation
+  as it happens, and on game end announces the winner with a `ptn.ninja`
+  link to the full game before archiving the thread 24 hours later.
+  `<game>` accepts a game ID or a partial player name (ambiguous matches
+  ask the user to be more specific); with no argument it behaves like
+  `/list`.
+- `/seeks` (aliases `/s`, `/seek`) — lists currently open public seeks
+  (private challenges aimed at one specific opponent are excluded, since
+  no one else can accept them).
+- `/help` — full explanation of every command and its aliases (Discord
+  caps a command's own description at 100 characters, so this is the
+  fuller version).
 
-Read `README.md` for the full setup/run instructions and file layout before
-making changes.
-
-## What's already done vs. what's next
-Done: project scaffolding, `/ping`, `/launch` (stub), webhook server,
-command registration script.
-
-Not done yet — pick these up:
-1. Verify `npm install` and `npm run build` succeed cleanly with no type errors.
-2. Confirm `.env` exists (the human sets this up — see SETUP_CHECKLIST.md).
-   Do not create or guess values for `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`,
-   or `WEBHOOK_SECRET`. If `.env` is missing, stop and ask the human to
-   complete the manual setup steps first.
-3. Run `npm run deploy-commands`, then `npm run dev`, and confirm the bot
-   comes online and both commands respond in Discord.
-4. Set up `.gitignore` (node_modules, dist, .env) and initialize git if not
-   already done.
-5. After that, take direction from the human on which real feature to build
-   next (e.g. wiring `/launch` to a real website API, adding moderation
-   commands, etc.) — don't invent new bot features unprompted.
+## Architecture
+- `src/playtak/client.ts` — the single guest WebSocket connection to
+  `wss://playtak.com/ws`, shared by the whole bot via `shared.ts`'s
+  singleton (`initPlaytak()`). It only ever sends `Login Guest`, the
+  keepalive `PING`, and per-watch `Observe`/`Unobserve` - never anything
+  that creates or affects a game.
+- `src/playtak/protocol.ts` — parses PlayTak's line-based wire protocol
+  into typed events. Field orders are confirmed against the server source
+  (`USTakAssociation/playtak-api` on GitHub) and cross-checked against
+  live traffic, not guessed.
+- `src/playtak/registry.ts` / `seekRegistry.ts` — live in-memory views of
+  active games and open seeks, kept in sync via protocol events, backing
+  `/list` and `/seeks` without round-tripping to PlayTak on every command.
+- `src/playtak/watcher.ts` — owns the whole watch-a-game lifecycle: thread
+  creation/reuse, history-replay-vs-live-move detection, reconnect
+  resubscription, and a periodic sweep that reconciles every open thread
+  against live state (self-heals desyncs, closes threads for games that
+  ended while the bot was offline). See that file's comments for why this
+  replaces a persisted store.
+- `src/playtak/ptn.ts`, `ptnLink.ts`, `result.ts`, `boardImage.ts` — PTN
+  notation conversion, `ptn.ninja` link building (with link shortening),
+  human-readable game results, and board-image rendering (via the
+  `tps-ninja` package, which depends on native `canvas` bindings).
+- `src/scripts/` — standalone probe scripts used to explore PlayTak's wire
+  protocol against live traffic. Not wired into the bot; kept around as
+  debugging tools.
 
 ## Conventions to follow
 - TypeScript, strict mode is on in `tsconfig.json` — don't loosen it.
@@ -47,13 +66,25 @@ Not done yet — pick these up:
   both `src/index.ts` (the commands Collection) and
   `src/deploy-commands.ts` (the commands array), or they won't show up in
   Discord.
+- Discord has no native command-alias support. An alias is a separate
+  command file registered under a different name that reuses the primary
+  command's `execute` (see `s.ts`/`seek.ts` next to `seeks.ts`, or
+  `l.ts`/`w.ts` next to `list.ts`/`watch.ts`).
+- Discord command descriptions are capped at 100 characters — keep
+  `.setDescription(...)` terse; put fuller explanations in `help.ts`.
 - Keep secrets out of source. Anything sensitive goes in `.env`, which is
   gitignored and never committed.
-- The in-memory `sessionStore.ts` is a placeholder. If a task involves
-  persistence surviving a restart, flag that a real store (Redis/Postgres)
-  is needed rather than silently expanding the in-memory Map.
 - Prefer small, verifiable steps: after any change, run `npm run build` to
   catch type errors before considering a task done.
+- Only one PlayTak connection should ever be open (`initPlaytak()`'s
+  singleton) — new features should subscribe to it, not open another.
+- This bot is currently developed and tested on the user's own
+  private/trusted Discord server. It will move to the "Tak Talk" Discord
+  server once features are further along - don't assume Tak Talk is the
+  current target, and give that community a heads-up before pointing a
+  persistent connection at PlayTak from there.
+- Eventual hosting target is the user's Dreamhost shell space; for now it
+  just runs locally via `npm run dev`.
 
 ## Constraints
 - Don't commit or print real token/secret values anywhere, including in
@@ -61,3 +92,15 @@ Not done yet — pick these up:
 - Don't register commands globally (omit `DISCORD_GUILD_ID`) unless asked —
   guild-scoped registration is faster for iteration and is what's expected
   during this development phase.
+- Never send anything to PlayTak that creates or affects a game (no seeks,
+  no moves, no account actions) — this bot is read-only against PlayTak by
+  design, which matters both technically and for staying a good citizen of
+  a small community's server.
+
+## What's next
+Take direction from the human on which feature to build next — don't
+invent new bot features unprompted. Known open items:
+1. Continue testing `/watch`, `/list`, and `/seeks` on the private test
+   server.
+2. When ready, bring the bot to the Tak Talk Discord server.
+3. Eventually deploy to Dreamhost shell hosting instead of running locally.
