@@ -20,7 +20,15 @@ export interface Seek {
   tournament: boolean;
   triggerMove: number;
   timeAmount: number;
+  // Normalized to '' when the seek is open to anyone. Protocol v1 sends an
+  // empty field for that case, v2 sends the literal "0" - both mean "no
+  // specific opponent", so both become '' here.
   opponent: string;
+  // Only present when the server sent a protocol-v2 seek line (we ask for
+  // v2 at login - see client.ts). Undefined means "the server didn't tell
+  // us", not "human", so callers that care must check for `=== false`
+  // rather than falsiness.
+  isBot?: boolean;
 }
 
 export interface GameListEntry {
@@ -76,10 +84,16 @@ export type PlaytakEvent =
   | { type: 'tell'; from: string; message: string }
   | { type: 'unknown'; raw: string };
 
+// Handles both protocol shapes: v1 ends at `opponent` (empty when open to
+// anyone), v2 sends "0" for that same case and appends a trailing bot flag.
+// We ask for v2, but a reconnect that somehow lands on v1 must still parse
+// rather than mangle every field - hence reading the flag positionally
+// instead of assuming it's there.
 function parseSeekFields(tokens: string[]): Seek {
   const [
     id, player, boardSize, timeSeconds, incrementSeconds, color, komi,
     pieces, capstones, unrated, tournament, triggerMove, timeAmount, opponent,
+    botFlag,
   ] = tokens;
   return {
     id: Number(id),
@@ -95,7 +109,8 @@ function parseSeekFields(tokens: string[]): Seek {
     tournament: tournament === '1',
     triggerMove: Number(triggerMove),
     timeAmount: Number(timeAmount),
-    opponent: opponent ?? '',
+    opponent: opponent === undefined || opponent === '0' ? '' : opponent,
+    isBot: botFlag === undefined ? undefined : botFlag === '1',
   };
 }
 

@@ -5,30 +5,36 @@ A Discord bot (TypeScript, discord.js v14) built around the abstract board
 game Tak and the PlayTak.com community. It maintains a single read-only
 guest connection to PlayTak and bridges it into Discord: browsing open
 seeks and in-progress games, and watching a specific game live in a
-dedicated thread as it's played, with board images and PTN notation.
-
-This started as a generic "launch a session on an external website" proof
-of concept. That direction was abandoned in favor of the PlayTak
-integration - the old `/launch` command, its webhook server, and its
-in-memory session store have been removed. `/ping` is the only piece that
-survived from the original scaffold.
+dedicated thread as it's played, with board images and PTN notation. It's
+self-hosted.
 
 ## Current state
 Slash commands (registered guild-scoped for near-instant updates - each
 bot instance only ever lives in one Discord server; testing happens on a
 separate instance, not a second server on the same process):
 - `/ping` — health check.
-- `/list` (alias `/l`) — lists PlayTak games currently in progress.
-- `/watch <game>` (alias `/w`) — watches a live PlayTak game: opens (or
+- `/list` — lists PlayTak games currently in progress.
+- `/watch <game>` (also `/spectate`) — watches a live PlayTak game: opens (or
   reuses) a Discord thread, posts the board plus each move in PTN notation
-  as it happens, and on game end announces the winner with a `ptn.ninja`
-  link to the full game before archiving the thread 24 hours later.
-  `<game>` accepts a game ID or a partial player name (ambiguous matches
-  ask the user to be more specific); with no argument it behaves like
-  `/list`.
-- `/seeks` (aliases `/s`, `/seek`) — lists currently open public seeks
-  (private challenges aimed at one specific opponent are excluded, since
-  no one else can accept them).
+  (with each player's remaining time) as it happens, and on game end
+  announces the winner with a `ptn.ninja` link to the full game before
+  archiving the thread 24 hours later. `<game>` accepts a game ID or a
+  partial player name - matched anywhere in the name, not just the start -
+  (ambiguous matches ask the user to be more specific); with no argument
+  it behaves like `/list`.
+- `/seeks` — lists currently open public seeks (private challenges aimed
+  at one specific opponent are excluded, since no one else can accept
+  them). Lists bot and human seeks alike.
+- `/announce` — per-channel toggle keeping a live list of
+  joinable seeks: posts when a *human* opens a public seek and deletes
+  that message once the seek is taken or cancelled, so the channel only
+  ever shows what's actually joinable. Bot seeks are skipped (they sit
+  open near-permanently and would drown out the rest). The on/off state
+  persists across restarts (`announceStore.ts`, a small JSON file - not a
+  database, since it's just a handful of channel ids); on startup the bot
+  resumes announcing in any channel that was on, and on a graceful stop
+  (`SIGINT`/`SIGTERM`) it deletes the "now on" confirmation message in
+  each one first, since it's stale the instant the bot goes down.
 - `/help` — full explanation of every command and its aliases (Discord
   caps a command's own description at 100 characters, so this is the
   fuller version).
@@ -36,9 +42,17 @@ separate instance, not a second server on the same process):
 ## Architecture
 - `src/playtak/client.ts` — the single guest WebSocket connection to
   `wss://playtak.com/ws`, shared by the whole bot via `shared.ts`'s
-  singleton (`initPlaytak()`). It only ever sends `Login Guest`, the
-  keepalive `PING`, and per-watch `Observe`/`Unobserve` - never anything
-  that creates or affects a game.
+  singleton (`initPlaytak()`). It only ever sends `Protocol 2`, `Login
+  Guest`, the keepalive `PING`, and per-watch `Observe`/`Unobserve` -
+  never anything that creates or affects a game. `Protocol 2` must be sent
+  before login (the server gates it on `player == null`) and is what makes
+  Seek lines carry the trailing bot flag `/announce` relies on; note it
+  also changes an empty `opponent` field to the literal "0", which
+  `protocol.ts` normalizes back to `''`.
+- `src/playtak/announcer.ts` — backs `/announce`. Dedupes by seek id
+  because PlayTak replays every open seek as `Seek new` on each
+  reconnect, which would otherwise re-announce the world every time the
+  socket blips. `announceStore.ts` persists which channels are on.
 - `src/playtak/protocol.ts` — parses PlayTak's line-based wire protocol
   into typed events. Field orders are confirmed against the server source
   (`USTakAssociation/playtak-api` on GitHub) and cross-checked against
@@ -69,8 +83,7 @@ separate instance, not a second server on the same process):
   Discord.
 - Discord has no native command-alias support. An alias is a separate
   command file registered under a different name that reuses the primary
-  command's `execute` (see `s.ts`/`seek.ts` next to `seeks.ts`, or
-  `l.ts`/`w.ts` next to `list.ts`/`watch.ts`).
+  command's `execute` (see `spectate.ts` next to `watch.ts`).
 - Discord command descriptions are capped at 100 characters — keep
   `.setDescription(...)` terse; put fuller explanations in `help.ts`.
 - Keep secrets out of source. Anything sensitive goes in `.env`, which is
@@ -86,8 +99,6 @@ separate instance, not a second server on the same process):
   persistent connection at PlayTak from there. Testing after that point
   happens via a separate bot instance, not by running the same instance in
   two servers at once.
-- Eventual hosting target is the user's Dreamhost shell space; for now it
-  just runs locally via `npm run dev`.
 
 ## Constraints
 - Don't commit or print real token/secret values anywhere, including in
@@ -103,7 +114,6 @@ separate instance, not a second server on the same process):
 ## What's next
 Take direction from the human on which feature to build next — don't
 invent new bot features unprompted. Known open items:
-1. Continue testing `/watch`, `/list`, and `/seeks` on the private test
-   server.
+1. Continue testing `/watch`, `/list`, `/seeks`, and `/announce` on the
+   private test server.
 2. When ready, bring the bot to the Tak Talk Discord server.
-3. Eventually deploy to Dreamhost shell hosting instead of running locally.

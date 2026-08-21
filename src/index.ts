@@ -5,12 +5,11 @@ import * as list from './commands/list';
 import * as watch from './commands/watch';
 import * as help from './commands/help';
 import * as seeks from './commands/seeks';
-import * as s from './commands/s';
-import * as seek from './commands/seek';
-import * as l from './commands/l';
-import * as w from './commands/w';
+import * as spectate from './commands/spectate';
+import * as announce from './commands/announce';
 import { initPlaytak } from './playtak/shared';
 import { registerWatcher } from './playtak/watcher';
+import { registerAnnouncer, shutdownAnnouncer } from './playtak/announcer';
 
 dotenv.config();
 
@@ -37,16 +36,15 @@ commands.set(list.data.name, list);
 commands.set(watch.data.name, watch);
 commands.set(help.data.name, help);
 commands.set(seeks.data.name, seeks);
-commands.set(s.data.name, s);
-commands.set(seek.data.name, seek);
-commands.set(l.data.name, l);
-commands.set(w.data.name, w);
+commands.set(spectate.data.name, spectate);
+commands.set(announce.data.name, announce);
 
 client.once('ready', (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
 
   const { client: playtak, gameRegistry } = initPlaytak();
   registerWatcher(playtak, readyClient, gameRegistry);
+  registerAnnouncer(playtak, readyClient);
 });
 
 client.on('interactionCreate', async (interaction) => {
@@ -67,5 +65,28 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 });
+
+// Deletes each announce-enabled channel's "now on" confirmation message
+// before exiting - it's stale the instant the bot goes down. The toggle
+// state itself is left alone; resumeAnnouncing() picks it back up on the
+// next start. Only covers a graceful stop (Ctrl+C, a process manager's
+// SIGTERM) - a crash or `kill -9` skips this, but that's fine, since
+// resumeAnnouncing() cleans up the stale message on the next startup
+// regardless of how the previous run ended.
+let shuttingDown = false;
+async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Received ${signal}, shutting down...`);
+  try {
+    await shutdownAnnouncer(client);
+  } catch (err) {
+    console.error('Error during shutdown cleanup:', err);
+  }
+  client.destroy();
+  process.exit(0);
+}
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 client.login(DISCORD_TOKEN);

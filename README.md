@@ -58,11 +58,13 @@ one game's move stream to mirror it into Discord.
 
 7. **Try it**
    - `/ping` — health check.
-   - `/seeks` (or `/s`, `/seek`) — see what public seeks are open right now.
-   - `/list` (or `/l`) — see what games are currently in progress.
-   - `/watch <game>` (or `/w`) — pass a game ID or a player name (partial
-     names work) to open a thread and follow that game live. Leave it blank
-     to behave like `/list`.
+   - `/seeks` — see what open seeks anyone can join right now.
+   - `/list` — see what games are currently in progress.
+   - `/watch <game>` (or `/spectate`) — pass a game ID or a player
+     name (partial names work, matched anywhere in the name) to open a
+     thread and follow that game live. Leave it blank to behave like `/list`.
+   - `/announce` — toggle a live list of joinable seeks in the current
+     channel, posted as humans open them and removed as they're taken.
 
 ## Project structure
 
@@ -72,9 +74,10 @@ src/
   deploy-commands.ts     # One-off script to register slash commands with Discord
   commands/
     ping.ts               # Health-check command
-    list.ts, l.ts          # List in-progress PlayTak games (+ alias)
-    watch.ts, w.ts          # Watch a game live in a thread (+ alias)
-    seeks.ts, s.ts, seek.ts # List open public seeks (+ aliases)
+    list.ts                # List in-progress PlayTak games
+    watch.ts, spectate.ts  # Watch a game live in a thread (+ alias)
+    seeks.ts                # List open joinable seeks
+    announce.ts             # Toggle the live joinable-seeks list in a channel
     help.ts                # Full command/alias explanations
   playtak/
     client.ts             # The single guest WebSocket connection to PlayTak
@@ -82,6 +85,7 @@ src/
     shared.ts               # Singleton wiring the connection + registries together
     registry.ts, seekRegistry.ts  # Live in-memory views of active games / open seeks
     gamesReply.ts, seeksReply.ts  # Shared reply text builders for the commands above
+    announcer.ts            # Live joinable-games list: post on open, delete when taken
     watcher.ts              # Thread lifecycle: create/reuse, live moves, reconnect, sweep
     ptn.ts, ptnLink.ts, result.ts, boardImage.ts  # Notation, links, results, board rendering
   scripts/
@@ -96,8 +100,7 @@ src/
   private Discord server. Once it's solid, invite it to the Tak Talk
   Discord server (worth giving the community a heads-up first, since it's
   a small community and guest connections are meant for humans).
-- **Deployment**: currently runs locally via `npm run dev`. The plan is to
-  eventually host it on Dreamhost shell space instead.
+- **Deployment**: it's self-hosted.
 - **playtak-ui deep links**: PlayTak has no shareable join/spectate URLs
   today. A small PR to `USTakAssociation/playtak-ui` adding `?game=`/`?seek=`
   deep links would let `/watch` and future features link straight to a game

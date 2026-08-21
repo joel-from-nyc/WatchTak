@@ -48,6 +48,13 @@ export class PlaytakClient extends EventEmitter {
     this.ws = ws;
 
     ws.on('open', () => {
+      // Must come before Login Guest - the server only accepts `Protocol`
+      // while the connection has no player attached (Client.java gates it
+      // on `player == null`). v2 adds a trailing bot flag to Seek lines,
+      // which /announce needs to tell human seeks from bot seeks. Sent on
+      // every open, not just the first, so reconnects don't silently fall
+      // back to v1.
+      ws.send('Protocol 2');
       ws.send('Login Guest');
       this.pingTimer = setInterval(() => ws.send('PING'), PING_INTERVAL_MS);
       this.emit('connected');

@@ -5,10 +5,8 @@ import * as list from './commands/list';
 import * as watch from './commands/watch';
 import * as help from './commands/help';
 import * as seeks from './commands/seeks';
-import * as s from './commands/s';
-import * as seek from './commands/seek';
-import * as l from './commands/l';
-import * as w from './commands/w';
+import * as spectate from './commands/spectate';
+import * as announce from './commands/announce';
 
 dotenv.config();
 
@@ -24,10 +22,8 @@ const commands = [
   watch.data.toJSON(),
   help.data.toJSON(),
   seeks.data.toJSON(),
-  s.data.toJSON(),
-  seek.data.toJSON(),
-  l.data.toJSON(),
-  w.data.toJSON(),
+  spectate.data.toJSON(),
+  announce.data.toJSON(),
 ];
 
 const rest = new REST().setToken(DISCORD_TOKEN);

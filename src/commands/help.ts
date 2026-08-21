@@ -5,13 +5,19 @@ import { SlashCommandBuilder, ChatInputCommandInteraction } from 'discord.js';
 // hand-written text rather than reusing each command's `data.description`.
 const HELP_TEXT = [
   '**/ping** - Health check. Replies with pong and the round-trip latency.',
-  '**/list** (alias **/l**) - Lists PlayTak games currently in progress, with board size, time control, and rated/unrated.',
-  '**/watch <game>** (alias **/w**) - Watches a live PlayTak game: opens a thread (or reuses one already watching it) ' +
-    'and posts the board plus each move, in PTN notation, as it happens. `<game>` can be a game ID or a player name - ' +
-    'partial names work too (e.g. "grup" matches "gruppler"), but if it matches more than one active game you\'ll be ' +
-    'asked to be more specific. Leave `<game>` blank to just see the active game list, same as `/list`.',
-  '**/seeks** (aliases **/s**, **/seek**) - Lists open public seeks on PlayTak - games anyone can join right now. ' +
-    'Private seeks aimed at a specific opponent are left out since only that person can accept them.',
+  '**/list** - Lists PlayTak games currently in progress, with board size, time control, and rated/unrated.',
+  '**/watch <game>** (also **/spectate**) - Follows a live PlayTak game: opens a thread (or reuses ' +
+    'one already watching it) and posts the board plus each move, in PTN notation, as it happens. `<game>` can be a ' +
+    'game ID or a player name - partial names work too and match anywhere in the name, not just the start ' +
+    '(e.g. "ppl" matches "gruppler"), but if it matches more than one active game you\'ll be asked to be more ' +
+    'specific. Leave `<game>` blank to just see the active game list, same as `/list`.',
+  '**/seeks** - Lists open public seeks on PlayTak - games anyone can join right now. Private challenges aimed ' +
+    'at a specific opponent are left out, since only that person can accept them.',
+  '**/announce** - Toggles a live list of open seeks on or off in the channel you run it in. ' +
+    'While on, I post here whenever a human opens a new seek on PlayTak, and delete that message once it ' +
+    'is taken or cancelled - so what you see is what you can actually join. Seeks opened by bots are skipped (they ' +
+    'sit open more or less permanently and would drown out the rest), as are private challenges. ' +
+    'Run it again in the same channel to turn it off and clear the list.',
   '**/help** - Shows this list.',
 ].join('\n\n');
 

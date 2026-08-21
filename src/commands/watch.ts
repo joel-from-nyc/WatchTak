@@ -58,6 +58,6 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   await interaction.deferReply();
   const { thread, alreadyWatching } = await watchGame(getPlaytakClient(), interaction.channel, game);
   await interaction.editReply(
-    alreadyWatching ? `Already watching in ${thread}.` : `Started watching in ${thread}.`,
+    alreadyWatching ? `Already watching. Spectate: ${thread}` : `Spectate: ${thread}`,
   );
 }

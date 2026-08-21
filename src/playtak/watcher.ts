@@ -40,6 +40,10 @@ interface WatchState {
   komi: number;
   plies: string[];
   live: boolean;
+  // Most recently known remaining time, from Game#<no> Time events.
+  // Undefined until the first one arrives.
+  whiteSeconds?: number;
+  blackSeconds?: number;
   settleTimer?: NodeJS.Timeout;
   // 'newThread': this is the first time anyone has watched this game, so the
   // thread has no prior move history visible - dump the full PTN move list
@@ -54,6 +58,18 @@ const activeWatches = new Map<number, WatchState>();
 
 function threadName(white: string, black: string, gameNo: number): string {
   return `${white} vs ${black} (#${gameNo})`;
+}
+
+function formatSeconds(totalSeconds: number): string {
+  const clamped = Math.max(0, Math.round(totalSeconds));
+  const minutes = Math.floor(clamped / 60);
+  const seconds = clamped % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function timeSuffix(state: WatchState): string {
+  if (state.whiteSeconds === undefined || state.blackSeconds === undefined) return '';
+  return ` (Time left: ${formatSeconds(state.whiteSeconds)}W, ${formatSeconds(state.blackSeconds)}B)`;
 }
 
 async function closeThread(thread: ThreadChannel): Promise<void> {
@@ -126,13 +142,20 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
       event.type !== 'gamePlace' &&
       event.type !== 'gameSpread' &&
       event.type !== 'gameOver' &&
-      event.type !== 'gameAbandoned'
+      event.type !== 'gameAbandoned' &&
+      event.type !== 'gameTime'
     ) {
       return;
     }
 
     const state = activeWatches.get(event.gameNo);
     if (!state) return;
+
+    if (event.type === 'gameTime') {
+      state.whiteSeconds = event.whiteSeconds;
+      state.blackSeconds = event.blackSeconds;
+      return;
+    }
 
     if (event.type === 'gameOver') {
       await handleGameEnd(playtak, state, describeResult(event.result, state.white, state.black), event.result);
@@ -154,7 +177,7 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
     const player = state.plies.length % 2 === 0 ? state.white : state.black;
     state.plies.push(ptn);
     try {
-      await postBoard(state, `**${player}**: ${ptn}`);
+      await postBoard(state, `**${player}**: ${ptn}${timeSuffix(state)}`);
     } catch (err) {
       console.error(`Failed to post move to thread for game #${event.gameNo}:`, err);
     }
