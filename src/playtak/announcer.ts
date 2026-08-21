@@ -102,27 +102,13 @@ async function activateChannel(discordClient: Client, channel: TextChannel): Pro
   return tracked;
 }
 
-// Returns the new state. Turning it on shows every human seek that's open
-// right now, so the channel is immediately an accurate list rather than
-// starting empty and filling in only as new seeks appear. Turning it off
-// removes the announcements, since a stale list of "joinable" games is
-// worse than none. The on/off state itself is persisted by the caller
-// (see recordConfirmationMessage()) - this only handles the channel's
-// message contents.
-export async function toggleAnnounce(discordClient: Client, channelId: string): Promise<boolean> {
-  const existing = announcements.get(channelId);
-
-  if (existing) {
-    announcements.delete(channelId);
-    clearChannelAnnouncing(channelId);
-    const channel = await fetchTextChannel(discordClient, channelId);
-    if (channel) {
-      for (const seekId of [...existing.keys()]) {
-        await deleteTracked(channel, existing, seekId);
-      }
-    }
-    return false;
-  }
+// Shows every human seek that's open right now, so the channel is
+// immediately an accurate list rather than starting empty and filling in
+// only as new seeks appear. No-op if already on. The on/off state itself is
+// persisted by the caller (see recordConfirmationMessage()) - this only
+// handles the channel's message contents.
+export async function turnOnAnnounce(discordClient: Client, channelId: string): Promise<void> {
+  if (announcements.has(channelId)) return;
 
   const channel = await fetchTextChannel(discordClient, channelId);
   if (channel) {
@@ -130,7 +116,22 @@ export async function toggleAnnounce(discordClient: Client, channelId: string): 
   } else {
     announcements.set(channelId, new Map());
   }
-  return true;
+}
+
+// Removes the announcements, since a stale list of "joinable" games is
+// worse than none. No-op if already off.
+export async function turnOffAnnounce(discordClient: Client, channelId: string): Promise<void> {
+  const existing = announcements.get(channelId);
+  if (!existing) return;
+
+  announcements.delete(channelId);
+  clearChannelAnnouncing(channelId);
+  const channel = await fetchTextChannel(discordClient, channelId);
+  if (channel) {
+    for (const seekId of [...existing.keys()]) {
+      await deleteTracked(channel, existing, seekId);
+    }
+  }
 }
 
 // Called by /announce right after posting its "now on" confirmation, so

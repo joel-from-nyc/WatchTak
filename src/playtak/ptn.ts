@@ -36,11 +36,24 @@ export function spreadToPtn(move: SpreadMove): string {
 }
 
 // Formats a flat list of plies (in play order, starting with white) as
-// numbered PTN move text, e.g. "1. a1 f6 2. Cd4 Sd3".
-export function formatPtnMoveList(plies: string[]): string {
+// numbered PTN move text, e.g. "1. a1 f6 2. Cd4 Sd3". `startPly` is the
+// absolute ply index (0 = white's first move) that `plies[0]` represents -
+// needed when formatting a suffix of a game rather than the whole thing
+// (e.g. only the moves missed during a reconnect). A suffix that starts
+// mid-pair (black to move) is shown with ellipsis notation ("12... c3"),
+// matching standard chess/PTN convention for "black moved, white's part
+// already known".
+export function formatPtnMoveList(plies: string[], startPly = 0): string {
   const moves: string[] = [];
-  for (let i = 0; i < plies.length; i += 2) {
-    const moveNum = i / 2 + 1;
+  let i = 0;
+
+  if (startPly % 2 === 1 && plies.length > 0) {
+    moves.push(`${Math.floor(startPly / 2) + 1}... ${plies[0]}`);
+    i = 1;
+  }
+
+  for (; i < plies.length; i += 2) {
+    const moveNum = Math.floor((startPly + i) / 2) + 1;
     const white = plies[i];
     const black = plies[i + 1];
     moves.push(black ? `${moveNum}. ${white} ${black}` : `${moveNum}. ${white}`);

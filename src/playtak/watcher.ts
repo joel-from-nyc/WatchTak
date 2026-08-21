@@ -47,9 +47,15 @@ interface WatchState {
   settleTimer?: NodeJS.Timeout;
   // 'newThread': this is the first time anyone has watched this game, so the
   // thread has no prior move history visible - dump the full PTN move list
-  // once caught up. 'resume': re-attaching to a thread that already shows
-  // that history (reconnect, or a sweep match) - skip the dump.
-  historyMode: 'newThread' | 'resume';
+  // once caught up. 'reconnect': the thread already has moves up through
+  // `catchupFromPly`, so dump only what came after (the moves actually
+  // missed while disconnected) rather than the whole game again. 'resume':
+  // a sweep match with no way to know what the thread already shows - skip
+  // the dump entirely rather than guess.
+  historyMode: 'newThread' | 'reconnect' | 'resume';
+  // Only meaningful when historyMode is 'reconnect' - the ply count the
+  // thread already had text for before the disconnect.
+  catchupFromPly?: number;
 }
 
 // One bot instance only ever lives in one Discord server, so a game is only
@@ -94,8 +100,18 @@ function armSettleTimer(state: WatchState): void {
     try {
       if (state.historyMode === 'newThread' && state.plies.length > 0) {
         await state.thread.send(`\`\`\`\n${formatPtnMoveList(state.plies)}\n\`\`\``);
+        await postBoard(state, 'Current position.');
+      } else if (state.historyMode === 'reconnect') {
+        const missed = state.plies.slice(state.catchupFromPly ?? 0);
+        // Nothing actually happened while disconnected - no catch-up
+        // needed, so stay quiet rather than post a redundant board.
+        if (missed.length > 0) {
+          await state.thread.send(`\`\`\`\n${formatPtnMoveList(missed, state.catchupFromPly ?? 0)}\n\`\`\``);
+          await postBoard(state, 'Current position.');
+        }
+      } else {
+        await postBoard(state, 'Current position.');
       }
-      await postBoard(state, 'Current position.');
     } catch (err) {
       console.error(`Failed to post caught-up position for game #${state.gameNo}:`, err);
     }
@@ -185,13 +201,18 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
 
   // A dropped/reconnected WebSocket loses every server-side Observe
   // subscription. Re-subscribe to everything we were watching, the same way
-  // a fresh watch starts: history replays again, so plies/live are reset and
-  // the replay is silently reabsorbed rather than double-posted.
+  // a fresh watch starts: history replays again, so plies/live are reset.
+  // The replay is silently reabsorbed rather than double-posted, but unlike
+  // a plain resume, we know exactly what the thread already showed
+  // (`catchupFromPly`), so once caught up the moves actually missed while
+  // disconnected get printed as text, then a single current-position board -
+  // not a board redrawn per missed move.
   playtak.on('connected', () => {
     for (const state of activeWatches.values()) {
+      state.catchupFromPly = state.plies.length;
       state.live = false;
       state.plies = [];
-      state.historyMode = 'resume';
+      state.historyMode = 'reconnect';
       beginObserving(playtak, state);
     }
   });

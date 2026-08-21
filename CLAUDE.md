@@ -25,7 +25,8 @@ separate instance, not a second server on the same process):
 - `/seeks` — lists currently open public seeks (private challenges aimed
   at one specific opponent are excluded, since no one else can accept
   them). Lists bot and human seeks alike.
-- `/announce` — per-channel toggle keeping a live list of
+- `/announce <on|off>` — explicit on/off (not a toggle - `/announce` alone
+  reports the current status without changing it), keeping a live list of
   joinable seeks: posts when a *human* opens a public seek and deletes
   that message once the seek is taken or cancelled, so the channel only
   ever shows what's actually joinable. Bot seeks are skipped (they sit
@@ -47,8 +48,11 @@ separate instance, not a second server on the same process):
   never anything that creates or affects a game. `Protocol 2` must be sent
   before login (the server gates it on `player == null`) and is what makes
   Seek lines carry the trailing bot flag `/announce` relies on; note it
-  also changes an empty `opponent` field to the literal "0", which
-  `protocol.ts` normalizes back to `''`.
+  also changes an empty `opponent` field to the literal "0" (normalized
+  back to `''` by `protocol.ts`), and switches per-game clock updates from
+  `Game#<no> Time <secs> <secs>` to `Game#<no> Timems <ms> <ms>` - easy to
+  miss since it's a silent rename, not a new message type. `protocol.ts`
+  parses both.
 - `src/playtak/announcer.ts` — backs `/announce`. Dedupes by seek id
   because PlayTak replays every open seek as `Seek new` on each
   reconnect, which would otherwise re-announce the world every time the
@@ -65,7 +69,10 @@ separate instance, not a second server on the same process):
   resubscription, and a periodic sweep that reconciles every open thread
   against live state (self-heals desyncs, closes threads for games that
   ended while the bot was offline). See that file's comments for why this
-  replaces a persisted store.
+  replaces a persisted store. On a reconnect, a thread that was already
+  being watched gets the moves it missed while disconnected printed as
+  text (not redrawn board-per-move) followed by one current-position
+  board - `WatchState.historyMode`'s `'reconnect'` case.
 - `src/playtak/ptn.ts`, `ptnLink.ts`, `result.ts`, `boardImage.ts` — PTN
   notation conversion, `ptn.ninja` link building (with link shortening),
   human-readable game results, and board-image rendering (via the

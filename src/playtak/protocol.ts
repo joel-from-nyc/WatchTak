@@ -209,6 +209,21 @@ export function parseLine(line: string): PlaytakEvent {
     };
   }
 
+  // Once we've sent `Protocol 2` (see client.ts), the server switches from
+  // seconds to milliseconds for time updates and renames the message to
+  // `Timems` - confirmed against live traffic while observing a game.
+  // Handling both keeps this correct even if the negotiated version ever
+  // changes back.
+  const gameTimeMsMatch = /^Game#(\d+) Timems (\d+) (\d+)$/.exec(line);
+  if (gameTimeMsMatch) {
+    return {
+      type: 'gameTime',
+      gameNo: Number(gameTimeMsMatch[1]),
+      whiteSeconds: Number(gameTimeMsMatch[2]) / 1000,
+      blackSeconds: Number(gameTimeMsMatch[3]) / 1000,
+    };
+  }
+
   const gameTimeMatch = /^Game#(\d+) Time (\d+) (\d+)$/.exec(line);
   if (gameTimeMatch) {
     return {

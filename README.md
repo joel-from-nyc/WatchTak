@@ -63,8 +63,9 @@ one game's move stream to mirror it into Discord.
    - `/watch <game>` (or `/spectate`) — pass a game ID or a player
      name (partial names work, matched anywhere in the name) to open a
      thread and follow that game live. Leave it blank to behave like `/list`.
-   - `/announce` — toggle a live list of joinable seeks in the current
-     channel, posted as humans open them and removed as they're taken.
+   - `/announce on` / `/announce off` — turn a live list of joinable seeks on or
+     off in the current channel, posted as humans open them and removed as
+     they're taken. `/announce` with no argument reports the current status.
 
 ## Project structure
 
