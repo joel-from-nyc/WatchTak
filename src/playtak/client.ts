@@ -6,6 +6,18 @@ const PLAYTAK_WS_URL = 'wss://playtak.com/ws';
 const PING_INTERVAL_MS = 30_000;
 const RECONNECT_DELAY_MS = 5_000;
 
+// Diagnostic only - flags when events are arriving faster than the bot can
+// plausibly be keeping up with (e.g. board rendering is synchronous and
+// scales with game length, so several fast games at once can make the event
+// loop fall behind). A legitimate burst - PlayTak replaying a game's full
+// history on Observe, or every open seek on reconnect - can also cross this
+// threshold; that's expected and not itself a bug, so this only logs a
+// warning rather than dropping or throttling anything. Cooldown keeps a
+// sustained flood from spamming the log once per event.
+const EVENT_RATE_WINDOW_MS = 1_000;
+const EVENT_RATE_WARN_THRESHOLD = 50;
+const EVENT_RATE_WARN_COOLDOWN_MS = 30_000;
+
 export interface PlaytakClient {
   on(event: 'event', listener: (event: PlaytakEvent) => void): this;
   on(event: 'connected', listener: () => void): this;
@@ -20,6 +32,8 @@ export class PlaytakClient extends EventEmitter {
   private pingTimer?: NodeJS.Timeout;
   private reconnectTimer?: NodeJS.Timeout;
   private stopped = false;
+  private recentEventTimestamps: number[] = [];
+  private lastRateWarningAt = 0;
 
   connect(): void {
     this.stopped = false;
@@ -43,6 +57,27 @@ export class PlaytakClient extends EventEmitter {
     this.ws?.close();
   }
 
+  private trackEventRate(): void {
+    const now = Date.now();
+    this.recentEventTimestamps.push(now);
+    const cutoff = now - EVENT_RATE_WINDOW_MS;
+    while (this.recentEventTimestamps.length > 0 && this.recentEventTimestamps[0] < cutoff) {
+      this.recentEventTimestamps.shift();
+    }
+    if (
+      this.recentEventTimestamps.length > EVENT_RATE_WARN_THRESHOLD &&
+      now - this.lastRateWarningAt > EVENT_RATE_WARN_COOLDOWN_MS
+    ) {
+      this.lastRateWarningAt = now;
+      console.warn(
+        `PlayTak events arriving fast (${this.recentEventTimestamps.length} in the last ` +
+          `${EVENT_RATE_WINDOW_MS}ms) - handlers may be falling behind and producing errors ` +
+          'or delayed posts. This can be a normal replay burst (Observe/reconnect) rather ' +
+          'than a real problem.',
+      );
+    }
+  }
+
   private openSocket(): void {
     const ws = new WebSocket(PLAYTAK_WS_URL, 'binary');
     this.ws = ws;
@@ -63,6 +98,7 @@ export class PlaytakClient extends EventEmitter {
     ws.on('message', (data) => {
       for (const line of data.toString().split('\n')) {
         if (line.length > 0) {
+          this.trackEventRate();
           this.emit('event', parseLine(line));
         }
       }

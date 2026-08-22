@@ -51,11 +51,13 @@ interface WatchState {
   // once caught up. 'reconnect': the thread already has moves up through
   // `catchupFromPly`, so dump only what came after (the moves actually
   // missed while disconnected) rather than the whole game again. 'resume':
-  // a sweep match with no way to know what the thread already shows - skip
-  // the dump entirely rather than guess.
+  // a sweep match where sweepThreads() couldn't work out what the thread
+  // already shows (see findKnownPlyCount()) - skip the dump entirely rather
+  // than guess.
   historyMode: 'newThread' | 'reconnect' | 'resume';
   // Only meaningful when historyMode is 'reconnect' - the ply count the
-  // thread already had text for before the disconnect.
+  // thread already had text for before the disconnect (or, for a sweep
+  // resume, before the restart - see findKnownPlyCount()).
   catchupFromPly?: number;
 }
 
@@ -79,6 +81,21 @@ function timeText(state: WatchState): string | undefined {
   return `${formatSeconds(state.whiteSeconds)}W, ${formatSeconds(state.blackSeconds)}B`;
 }
 
+// Text for "this ply was just played" - used both when a move actually
+// just arrived live, and to redescribe the new current position after an
+// undo (see the gameUndo handling below), since from the thread's
+// perspective the ply now on top of `state.plies` reads the same either way.
+// Move/Time first, then the played line, to read top-to-bottom under the
+// board image as: board, move/time, played.
+function playedMoveText(state: WatchState, ply: number, ptn: string): string {
+  const player = ply % 2 === 0 ? state.white : state.black;
+  const moveNumber = Math.floor(ply / 2) + 1;
+  const colorLetter = ply % 2 === 0 ? 'W' : 'B';
+  const time = timeText(state);
+  const moveTimeLine = `**Move:** ${moveNumber}${colorLetter}` + (time ? ` | **Time:** ${time}` : '');
+  return `${moveTimeLine}\n**${player}** played **${ptn}**`;
+}
+
 async function closeThread(thread: ThreadChannel): Promise<void> {
   await thread.setArchived(true).catch((err) => {
     console.error(`Failed to archive thread ${thread.id}:`, err);
@@ -86,6 +103,11 @@ async function closeThread(thread: ThreadChannel): Promise<void> {
   await thread.setLocked(true).catch(() => {});
 }
 
+// Text and board image in one message. Discord always renders a message's
+// own text above its attachments - there's no way to put the image first
+// within a single message - so the board ends up last regardless of field
+// order here; that's an accepted tradeoff for keeping this to one message
+// rather than two.
 async function postBoard(state: WatchState, content?: string): Promise<void> {
   const png = renderBoardPng(state.boardSize, state.komi, state.plies, state.white, state.black);
   await state.thread.send({
@@ -160,7 +182,8 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
       event.type !== 'gameSpread' &&
       event.type !== 'gameOver' &&
       event.type !== 'gameAbandoned' &&
-      event.type !== 'gameTime'
+      event.type !== 'gameTime' &&
+      event.type !== 'gameUndo'
     ) {
       return;
     }
@@ -183,6 +206,38 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
       return;
     }
 
+    if (event.type === 'gameUndo') {
+      // Nothing recorded yet to take back (e.g. an undo arriving mid
+      // history-replay before any ply landed) - ignore rather than pop an
+      // empty array.
+      if (state.plies.length === 0) return;
+
+      const undonePly = state.plies.length - 1;
+      const undoingPlayer = undonePly % 2 === 0 ? state.white : state.black;
+      state.plies.pop();
+
+      // Still catching up on history - just correct the buffered plies and
+      // let the settle timer's eventual catch-up post reflect the result;
+      // no live announcement to make yet.
+      if (!state.live) {
+        armSettleTimer(state);
+        return;
+      }
+
+      try {
+        await state.thread.send(`**${undoingPlayer}** took back their move.`);
+        if (state.plies.length === 0) {
+          await postBoard(state, 'Current position.');
+        } else {
+          const ply = state.plies.length - 1;
+          await postBoard(state, playedMoveText(state, ply, state.plies[ply]));
+        }
+      } catch (err) {
+        console.error(`Failed to post undo for game #${event.gameNo}:`, err);
+      }
+      return;
+    }
+
     const ptn = event.type === 'gamePlace' ? placeToPtn(event.move) : spreadToPtn(event.move);
 
     if (!state.live) {
@@ -192,14 +247,9 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
     }
 
     const ply = state.plies.length;
-    const player = ply % 2 === 0 ? state.white : state.black;
-    const moveNumber = Math.floor(ply / 2) + 1;
-    const colorLetter = ply % 2 === 0 ? 'W' : 'B';
     state.plies.push(ptn);
-    const time = timeText(state);
-    const secondLine = `**Move:** ${moveNumber}${colorLetter}` + (time ? ` | **Time:** ${time}` : '');
     try {
-      await postBoard(state, `**${player}** played **${ptn}**\n${secondLine}`);
+      await postBoard(state, playedMoveText(state, ply, ptn));
     } catch (err) {
       console.error(`Failed to post move to thread for game #${event.gameNo}:`, err);
     }
@@ -215,10 +265,20 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
   // not a board redrawn per missed move.
   playtak.on('connected', () => {
     for (const state of activeWatches.values()) {
-      state.catchupFromPly = state.plies.length;
+      // state.live is only true once a previous catch-up has actually
+      // finished and the thread is known to be showing current plies - only
+      // then does state.plies.length mean "what the thread displayed".
+      // A reconnect landing while a previous replay is still in flight
+      // (state.live already false) would otherwise overwrite
+      // catchupFromPly with a partial replay count, corrupting what gets
+      // printed as "missed" once things finally settle - so leave it (and
+      // historyMode) untouched and just restart the observe.
+      if (state.live) {
+        state.catchupFromPly = state.plies.length;
+        state.historyMode = 'reconnect';
+      }
       state.live = false;
       state.plies = [];
-      state.historyMode = 'reconnect';
       beginObserving(playtak, state);
     }
   });
@@ -300,6 +360,41 @@ async function hasAlreadyWarnedClose(thread: ThreadChannel): Promise<boolean> {
   return recent.some((message) => message.content.includes(CLOSE_WARNING_TEXT));
 }
 
+// Matches the "**Move:** <number><W/B>" line every move/undo post carries
+// (see playedMoveText()) - the only place a ply number appears in the
+// thread's own history.
+const MOVE_LINE_PATTERN = /\*\*Move:\*\*\s*(\d+)([WB])/;
+
+function plyFromMoveLine(moveNumber: number, colorLetter: string): number {
+  return (moveNumber - 1) * 2 + (colorLetter === 'W' ? 0 : 1);
+}
+
+// A cold restart has no memory of what a thread already showed - unlike a
+// same-process WebSocket reconnect, there's no `state.plies` left over to
+// diff against. Reconstructs the same information from the thread's own
+// message history instead, by finding the highest ply number mentioned in
+// any past move/undo post, so a resumed thread can still get a "what you
+// missed" summary rather than silently jumping straight to a bare board
+// (see sweepThreads()). Returns undefined - "unknown, don't guess" - if
+// nothing in recent history carries a ply number, e.g. a brand-new game
+// with zero moves posted yet.
+async function findKnownPlyCount(thread: ThreadChannel): Promise<number | undefined> {
+  const recent = await thread.messages.fetch({ limit: 100 }).catch(() => null);
+  if (!recent) return undefined;
+
+  let highestPly: number | undefined;
+  for (const message of recent.values()) {
+    const texts = [message.content, ...message.embeds.map((embed) => embed.description ?? '')];
+    for (const text of texts) {
+      const match = MOVE_LINE_PATTERN.exec(text);
+      if (!match) continue;
+      const ply = plyFromMoveLine(Number(match[1]), match[2]);
+      if (highestPly === undefined || ply > highestPly) highestPly = ply;
+    }
+  }
+  return highestPly === undefined ? undefined : highestPly + 1;
+}
+
 // Reconciles every one of the bot's own open game threads against live
 // PlayTak state, using Discord's own thread list as the source of truth
 // (this process has no memory of its own once it exits or reconnects) -
@@ -339,6 +434,13 @@ export async function sweepThreads(discordClient: Client, playtak: PlaytakClient
 
       if (game) {
         if (!activeWatches.has(gameNo)) {
+          // Reconstruct what the thread already showed from its own
+          // message history (see findKnownPlyCount()) so a resumed thread
+          // still gets a "what you missed" summary like a same-process
+          // reconnect would, rather than jumping straight to a bare board.
+          // Falls back to skipping the dump only if that can't be
+          // determined (e.g. no move has ever been posted here).
+          const knownPlyCount = await findKnownPlyCount(thread);
           beginObserving(playtak, {
             gameNo,
             thread,
@@ -348,7 +450,8 @@ export async function sweepThreads(discordClient: Client, playtak: PlaytakClient
             komi: game.komi / 2,
             plies: [],
             live: false,
-            historyMode: 'resume',
+            historyMode: knownPlyCount === undefined ? 'resume' : 'reconnect',
+            catchupFromPly: knownPlyCount,
           });
         }
         continue;

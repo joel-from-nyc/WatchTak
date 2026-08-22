@@ -17,6 +17,13 @@ const RECONNECT_RECONCILE_MS = 2000;
 // other messages the bot posts there.
 const ANNOUNCEMENT_MARKER = 'has created a new game:';
 
+// Sentinels for a tracked seek whose announcement message is still being
+// sent - see postSeek()/deleteTracked() for why this matters. Discord
+// snowflake ids are all-digit strings, so these can't collide with a real
+// message id.
+const PENDING = 'pending';
+const PENDING_REMOVED = 'pending-removed';
+
 // Channels currently opted in via /announce, each mapping the seeks it's
 // showing to the message announcing them. This is what makes the channel a
 // live view rather than a feed: the message is deleted when its seek goes
@@ -55,17 +62,41 @@ async function fetchTextChannel(discordClient: Client, channelId: string): Promi
   return channel instanceof TextChannel ? channel : null;
 }
 
+// Reserves the seek's slot with PENDING before the `send` even starts, so a
+// `Seek remove` arriving mid-send (the handler isn't serialized - see
+// registerAnnouncer()) has something to mark rather than silently no-op'ing
+// against a map that doesn't have the id yet. Without this, that race could
+// leave a permanent "join this game!" post for a seek that's already gone -
+// exactly what /announce exists to prevent.
 async function postSeek(channel: TextChannel, tracked: Map<number, string>, seek: Seek): Promise<void> {
+  tracked.set(seek.id, PENDING);
   const message = await channel.send(describeSeek(seek)).catch((err) => {
     console.error(`Failed to post seek announcement to ${channel.id}:`, err);
     return null;
   });
-  if (message) tracked.set(seek.id, message.id);
+
+  const removedWhilePending = tracked.get(seek.id) === PENDING_REMOVED;
+  if (!message) {
+    if (!removedWhilePending) tracked.delete(seek.id);
+    return;
+  }
+  if (removedWhilePending) {
+    tracked.delete(seek.id);
+    await channel.messages.delete(message.id).catch(() => {});
+    return;
+  }
+  tracked.set(seek.id, message.id);
 }
 
 async function deleteTracked(channel: TextChannel, tracked: Map<number, string>, seekId: number): Promise<void> {
   const messageId = tracked.get(seekId);
   if (!messageId) return;
+  // The announcement hasn't been sent yet - mark it so postSeek() deletes
+  // the message itself the moment it knows what that message is.
+  if (messageId === PENDING) {
+    tracked.set(seekId, PENDING_REMOVED);
+    return;
+  }
   tracked.delete(seekId);
   // Deleted individually rather than via bulkDelete: bulk deletion needs
   // the "Manage Messages" permission, but a bot can always delete its own
