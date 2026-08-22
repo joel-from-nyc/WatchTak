@@ -73,9 +73,9 @@ function formatSeconds(totalSeconds: number): string {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
-function timeSuffix(state: WatchState): string {
-  if (state.whiteSeconds === undefined || state.blackSeconds === undefined) return '';
-  return `\nTime left: ${formatSeconds(state.whiteSeconds)}W, ${formatSeconds(state.blackSeconds)}B`;
+function timeText(state: WatchState): string | undefined {
+  if (state.whiteSeconds === undefined || state.blackSeconds === undefined) return undefined;
+  return `${formatSeconds(state.whiteSeconds)}W, ${formatSeconds(state.blackSeconds)}B`;
 }
 
 async function closeThread(thread: ThreadChannel): Promise<void> {
@@ -195,8 +195,10 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
     const moveNumber = Math.floor(ply / 2) + 1;
     const colorLetter = ply % 2 === 0 ? 'W' : 'B';
     state.plies.push(ptn);
+    const time = timeText(state);
+    const secondLine = `**Move:** ${moveNumber}${colorLetter}` + (time ? ` | **Time:** ${time}` : '');
     try {
-      await postBoard(state, `**${player}**: ${moveNumber}${colorLetter}: ${ptn}${timeSuffix(state)}`);
+      await postBoard(state, `**${player}** played **${ptn}**\n${secondLine}`);
     } catch (err) {
       console.error(`Failed to post move to thread for game #${event.gameNo}:`, err);
     }
