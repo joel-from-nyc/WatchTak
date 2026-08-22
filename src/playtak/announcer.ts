@@ -3,6 +3,7 @@ import { PlaytakClient } from './client';
 import { Seek } from './protocol';
 import { getSeekRegistry } from './shared';
 import { loadAnnounceState, setChannelAnnouncing, clearChannelAnnouncing } from './announceStore';
+import { formatGameType, formatKomi, formatSeekColor } from './format';
 
 // How long to let PlayTak's post-(re)connect burst of `Seek new` lines land
 // before reconciling or resuming. On every (re)connect the server replays
@@ -24,11 +25,12 @@ const announcements = new Map<string, Map<number, string>>();
 
 function describeSeek(seek: Seek): string {
   const minutes = Math.floor(seek.timeSeconds / 60);
-  const color = seek.color === 'A' ? 'either color' : seek.color === 'W' ? 'white' : 'black';
-  const rated = seek.unrated ? 'unrated' : 'rated';
+  const color = formatSeekColor(seek.color);
+  const gameType = formatGameType(seek.unrated, seek.tournament);
+  const komi = formatKomi(seek.komi);
   return (
     `**${seek.player}** ${ANNOUNCEMENT_MARKER} ${seek.boardSize}x${seek.boardSize}, ` +
-    `${minutes}+${seek.incrementSeconds}, ${color}, ${rated}\n` +
+    `${minutes}+${seek.incrementSeconds}, ${komi} komi, ${color}, ${gameType}\n` +
     // Angle brackets inside the masked link suppress Discord's link-preview
     // embed, leaving just the clickable text.
     'Head over to [PlayTak.com](<https://playtak.com>) to join the game!'

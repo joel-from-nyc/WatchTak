@@ -6,6 +6,7 @@ import { placeToPtn, spreadToPtn, formatPtnMoveList } from './ptn';
 import { renderBoardPng } from './boardImage';
 import { describeResult } from './result';
 import { buildPtnNinjaLink } from './ptnLink';
+import { formatGameType, formatKomi } from './format';
 
 // How long to wait with no further place/spread messages before treating the
 // game as caught up to live play. On Observe, PlayTak immediately replays
@@ -269,10 +270,11 @@ export async function watchGame(
   });
 
   const minutes = Math.floor(game.timeSeconds / 60);
-  const rated = game.unrated ? 'unrated' : 'rated';
+  const gameType = formatGameType(game.unrated, game.tournament);
+  const komi = formatKomi(game.komi);
   await thread.send(
     `Watching **${game.white}** (white) vs **${game.black}** (black) - ` +
-      `${game.boardSize}x${game.boardSize}, ${minutes}+${game.incrementSeconds}, ${rated}.`,
+      `${game.boardSize}x${game.boardSize}, ${minutes}+${game.incrementSeconds}, ${komi} komi, ${gameType}.`,
   );
 
   const state: WatchState = {
