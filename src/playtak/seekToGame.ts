@@ -1,7 +1,7 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client } from 'discord.js';
 import { PlaytakClient } from './client';
-import { GameListEntry } from './protocol';
-import { fetchTextChannel } from './announcer';
+import { GameListEntry, Seek } from './protocol';
+import { fetchTextChannel, listAnnouncingChannelIds, isAnnounceQuiet } from './announcer';
 import { getWatchedThread } from './watcher';
 
 // PlayTak's wire protocol gives no id linking a seek to the game it becomes -
@@ -28,6 +28,9 @@ export interface SeekMessageRef {
 
 interface PendingRemoval {
   player: string;
+  // Empty for a private (opponent-targeted) seek - it was never announced
+  // anywhere, so there's nothing to edit; a match posts a fresh notice
+  // instead (see postFreshGameNotice()).
   refs: SeekMessageRef[];
   timer: NodeJS.Timeout;
 }
@@ -49,6 +52,12 @@ let replayingUntil = 0;
 function watchRow(gameNo: number): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`watch:${gameNo}`).setLabel('Watch game').setStyle(ButtonStyle.Primary),
+  );
+}
+
+function reviewRow(gameNo: number): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(`watch-review:${gameNo}`).setLabel('Review game').setStyle(ButtonStyle.Secondary),
   );
 }
 
@@ -86,23 +95,64 @@ async function convertToGameNotice(
   if (landed.length > 0) noticesByGame.set(game.gameNo, landed);
 }
 
+// Used when there's no existing seek announcement to convert - a game that
+// came from a private (opponent-targeted) challenge, such as a rematch,
+// which announcer.ts never shows anywhere since it's not a public seek.
+// Posts a fresh notice to every channel that's currently announcing and not
+// in quiet mode, so it behaves the same as a converted one from here on
+// (same retirement/pruning path, same button).
+async function postFreshGameNotice(discordClient: Client, game: GameListEntry): Promise<void> {
+  const content = `**${game.white}** vs **${game.black}** has started!`;
+  const landed: SeekMessageRef[] = [];
+
+  for (const channelId of listAnnouncingChannelIds({ excludeQuiet: true })) {
+    const channel = await fetchTextChannel(discordClient, channelId);
+    if (!channel) continue;
+    const message = await channel.send({ content, components: [watchRow(game.gameNo)] }).catch((err) => {
+      console.error(`Failed to post game-started notice to ${channelId}:`, err);
+      return null;
+    });
+    if (message) landed.push({ channelId, messageId: message.id });
+  }
+
+  if (landed.length > 0) noticesByGame.set(game.gameNo, landed);
+}
+
+// Quiet mode suppresses game-started notices, but seek announcements
+// themselves are unaffected by it - so a converted seek that happens to be
+// in a quiet channel doesn't become a notice there, it's just deleted the
+// same way a cancelled seek's announcement always has been.
+async function announceGame(discordClient: Client, game: GameListEntry, refs: SeekMessageRef[]): Promise<void> {
+  const activeRefs = refs.filter((ref) => !isAnnounceQuiet(ref.channelId));
+  const quietRefs = refs.filter((ref) => isAnnounceQuiet(ref.channelId));
+
+  if (quietRefs.length > 0) await deleteRefs(discordClient, quietRefs);
+
+  if (activeRefs.length > 0) {
+    await convertToGameNotice(discordClient, game, activeRefs);
+  } else if (refs.length === 0) {
+    // A private seek was never posted anywhere - post fresh to whatever
+    // channels are eligible right now, rather than nowhere.
+    await postFreshGameNotice(discordClient, game);
+  }
+}
+
 // Once the game is over the watch button is a trap - it can no longer start a
-// watch, since the game is gone from the registry. Swap it for a link to the
-// thread if one exists (a plain Link button needs no interaction handling and
-// can't go stale), or drop the button entirely if nobody ever watched.
+// watch, since the game is gone from the registry. Swap it for a Review
+// button (handled lazily, same as Watch - see index.ts), and prune the
+// channel down to just this one message: Discord's own "X started a thread"
+// system message, posted here when the thread was created, is deleted too,
+// since the notice itself (now pointing at the thread via Review) is enough.
 async function retireGameNotice(discordClient: Client, gameNo: number): Promise<void> {
   const refs = noticesByGame.get(gameNo);
   if (!refs) return;
   noticesByGame.delete(gameNo);
 
   const thread = getWatchedThread(gameNo);
-  const components = thread
-    ? [
-        new ActionRowBuilder<ButtonBuilder>().addComponents(
-          new ButtonBuilder().setLabel('Review game').setStyle(ButtonStyle.Link).setURL(thread.url),
-        ),
-      ]
-    : [];
+  if (thread) {
+    const starter = await thread.fetchStarterMessage().catch(() => null);
+    await starter?.delete().catch(() => {});
+  }
 
   for (const ref of refs) {
     const channel = await fetchTextChannel(discordClient, ref.channelId);
@@ -110,7 +160,7 @@ async function retireGameNotice(discordClient: Client, gameNo: number): Promise<
     const message = await channel.messages.fetch(ref.messageId).catch(() => null);
     if (!message) continue;
     const content = message.content.replace(/ has started!$/, ' has finished.');
-    await channel.messages.edit(ref.messageId, { content, components }).catch(() => {});
+    await channel.messages.edit(ref.messageId, { content, components: [reviewRow(gameNo)] }).catch(() => {});
   }
 }
 
@@ -119,32 +169,47 @@ function dropPendingRemoval(entry: PendingRemoval): void {
   if (index !== -1) pendingRemovals.splice(index, 1);
 }
 
-// Called from announcer.ts the moment a seek disappears, handing over the
-// announcement messages that were advertising it. Their fate is decided here:
-// edited into a game notice if a matching game shows up within the window,
-// deleted if it doesn't (the seek was simply cancelled). An empty list means
-// the seek wasn't being shown anywhere, so there's nothing to act on.
-export function notifySeekRemoved(discordClient: Client, player: string, refs: SeekMessageRef[]): void {
-  if (refs.length === 0) return;
+// A private, opponent-targeted seek that's confirmed non-bot - a rematch or
+// any other direct challenge between two humans. announcer.ts never
+// announces these (they're not public), but they're just as worth a
+// game-started notice once accepted - the wire protocol offers no way to
+// tell "rematch" apart from any other direct challenge anyway, so this
+// covers both the same way.
+function isPrivateHumanSeek(seek: Seek): boolean {
+  return seek.opponent !== '' && seek.isBot === false;
+}
 
-  const matchIndex = pendingGames.findIndex((p) => p.game.white === player || p.game.black === player);
+// Called from announcer.ts the moment a seek disappears, handing over the
+// announcement messages that were advertising it (empty for a seek that was
+// never shown anywhere - either private, or public but posted to no
+// currently-announcing channel). Fate is decided here: converted into a game
+// notice (or, with no refs, posted fresh) if a matching game shows up within
+// the window, deleted if it doesn't (the seek was simply cancelled) -
+// deletion only applies to real refs, since there's nothing to delete for a
+// private seek that never panned out.
+export function notifySeekRemoved(discordClient: Client, seek: Seek, refs: SeekMessageRef[]): void {
+  if (refs.length === 0 && !isPrivateHumanSeek(seek)) return;
+
+  const matchIndex = pendingGames.findIndex((p) => p.game.white === seek.player || p.game.black === seek.player);
   if (matchIndex !== -1) {
     const [match] = pendingGames.splice(matchIndex, 1);
     clearTimeout(match.timer);
-    convertToGameNotice(discordClient, match.game, refs).catch((err) => {
-      console.error('Failed to convert seek announcement:', err);
+    announceGame(discordClient, match.game, refs).catch((err) => {
+      console.error('Failed to announce game start:', err);
     });
     return;
   }
 
   const entry: PendingRemoval = {
-    player,
+    player: seek.player,
     refs,
     timer: setTimeout(() => {
       dropPendingRemoval(entry);
-      deleteRefs(discordClient, refs).catch((err) => {
-        console.error('Failed to remove cancelled seek announcement:', err);
-      });
+      if (refs.length > 0) {
+        deleteRefs(discordClient, refs).catch((err) => {
+          console.error('Failed to remove cancelled seek announcement:', err);
+        });
+      }
     }, CORRELATION_WINDOW_MS),
   };
   pendingRemovals.push(entry);
@@ -157,8 +222,8 @@ function notifyGameAdded(discordClient: Client, game: GameListEntry): void {
   if (matchIndex !== -1) {
     const [match] = pendingRemovals.splice(matchIndex, 1);
     clearTimeout(match.timer);
-    convertToGameNotice(discordClient, game, match.refs).catch((err) => {
-      console.error('Failed to convert seek announcement:', err);
+    announceGame(discordClient, game, match.refs).catch((err) => {
+      console.error('Failed to announce game start:', err);
     });
     return;
   }

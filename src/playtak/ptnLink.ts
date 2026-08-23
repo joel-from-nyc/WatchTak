@@ -27,7 +27,7 @@ function buildPtnDocument(game: PtnGameInfo): string {
 }
 
 function buildLongLink(game: PtnGameInfo): string {
-  return `https://ptn.ninja/${encodeURIComponent(buildPtnDocument(game))}`;
+  return `https://ptn.ninja/${encodeURIComponent(buildPtnDocument(game))}&theme=zen`;
 }
 
 // Shortens a ptn.ninja link via its own shortening service (confirmed
@@ -41,7 +41,7 @@ export async function buildPtnNinjaLink(game: PtnGameInfo): Promise<string> {
     const response = await fetch('https://url.ptn.ninja/short', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ptn }),
+      body: JSON.stringify({ ptn, params: { theme: 'zen' } }),
     });
     if (!response.ok) throw new Error(`ptn.ninja shortener returned ${response.status}`);
     const shortUrl = (await response.text()).trim();

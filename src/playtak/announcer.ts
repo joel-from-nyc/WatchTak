@@ -2,7 +2,7 @@ import { Client, TextChannel } from 'discord.js';
 import { PlaytakClient } from './client';
 import { Seek } from './protocol';
 import { getSeekRegistry } from './shared';
-import { loadAnnounceState, setChannelAnnouncing, clearChannelAnnouncing } from './announceStore';
+import { loadAnnounceState, setChannelAnnouncing, clearChannelAnnouncing, setChannelQuiet } from './announceStore';
 import { formatGameType, formatKomi, formatSeekColor } from './format';
 import { notifySeekRemoved, SeekMessageRef } from './seekToGame';
 
@@ -25,11 +25,18 @@ const ANNOUNCEMENT_MARKER = 'has created a new game:';
 const PENDING = 'pending';
 const PENDING_REMOVED = 'pending-removed';
 
-// Channels currently opted in via /announce, each mapping the seeks it's
-// showing to the message announcing them. This is what makes the channel a
-// live view rather than a feed: the message is deleted when its seek goes
-// away, so what's on screen is what's actually joinable.
-const announcements = new Map<string, Map<number, string>>();
+// A channel currently opted in via /announce: `tracked` maps the seeks it's
+// showing to the message announcing them - this is what makes the channel a
+// live view rather than a feed, since the message is deleted when its seek
+// goes away, so what's on screen is what's actually joinable. `quiet` gates
+// only the seek-to-game "started!" notices (see seekToGame.ts) - seek
+// announcements themselves are unaffected by it.
+interface ChannelAnnounceState {
+  tracked: Map<number, string>;
+  quiet: boolean;
+}
+
+const announcements = new Map<string, ChannelAnnounceState>();
 
 function describeSeek(seek: Seek): string {
   const minutes = Math.floor(seek.timeSeconds / 60);
@@ -56,6 +63,29 @@ function isAnnounceable(seek: Seek): boolean {
 
 export function isAnnouncing(channelId: string): boolean {
   return announcements.has(channelId);
+}
+
+export function isAnnounceQuiet(channelId: string): boolean {
+  return announcements.get(channelId)?.quiet ?? false;
+}
+
+// Flips quiet mode on a channel that's already announcing, without
+// resetting its tracked seek list - see announce.ts's `quiet`/`on` handling.
+// No-op if the channel isn't currently announcing.
+export function setAnnounceQuiet(channelId: string, quiet: boolean): void {
+  const state = announcements.get(channelId);
+  if (!state) return;
+  state.quiet = quiet;
+  setChannelQuiet(channelId, quiet);
+}
+
+// Channels eligible for a seek-to-game "started!" notice right now - used by
+// seekToGame.ts's postFreshGameNotice() when there's no existing seek
+// announcement to convert (a private/rematch-derived game).
+export function listAnnouncingChannelIds(options: { excludeQuiet: boolean } = { excludeQuiet: false }): string[] {
+  return [...announcements.entries()]
+    .filter(([, state]) => !options.excludeQuiet || !state.quiet)
+    .map(([channelId]) => channelId);
 }
 
 export async function fetchTextChannel(discordClient: Client, channelId: string): Promise<TextChannel | null> {
@@ -138,9 +168,9 @@ async function clearStaleAnnouncements(channel: TextChannel, botId: string): Pro
 // Wipes any stale announcements in the channel, then posts every human seek
 // that's currently open. Shared by toggling on and by resuming after a
 // restart - both start a channel from the same "accurate right now" state.
-async function activateChannel(discordClient: Client, channel: TextChannel): Promise<Map<number, string>> {
+async function activateChannel(discordClient: Client, channel: TextChannel, quiet: boolean): Promise<Map<number, string>> {
   const tracked = new Map<number, string>();
-  announcements.set(channel.id, tracked);
+  announcements.set(channel.id, { tracked, quiet });
 
   const botId = discordClient.user?.id;
   if (botId) await clearStaleAnnouncements(channel, botId);
@@ -152,17 +182,19 @@ async function activateChannel(discordClient: Client, channel: TextChannel): Pro
 
 // Shows every human seek that's open right now, so the channel is
 // immediately an accurate list rather than starting empty and filling in
-// only as new seeks appear. No-op if already on. The on/off state itself is
-// persisted by the caller (see recordConfirmationMessage()) - this only
-// handles the channel's message contents.
-export async function turnOnAnnounce(discordClient: Client, channelId: string): Promise<void> {
+// only as new seeks appear. No-op if already on (in either mode - use
+// setAnnounceQuiet() to switch modes on an already-active channel without a
+// full reset). The on/off state itself is persisted by the caller (see
+// recordConfirmationMessage()) - this only handles the channel's message
+// contents.
+export async function turnOnAnnounce(discordClient: Client, channelId: string, quiet = false): Promise<void> {
   if (announcements.has(channelId)) return;
 
   const channel = await fetchTextChannel(discordClient, channelId);
   if (channel) {
-    await activateChannel(discordClient, channel);
+    await activateChannel(discordClient, channel, quiet);
   } else {
-    announcements.set(channelId, new Map());
+    announcements.set(channelId, { tracked: new Map(), quiet });
   }
 }
 
@@ -176,8 +208,8 @@ export async function turnOffAnnounce(discordClient: Client, channelId: string):
   clearChannelAnnouncing(channelId);
   const channel = await fetchTextChannel(discordClient, channelId);
   if (channel) {
-    for (const seekId of [...existing.keys()]) {
-      await deleteTracked(channel, existing, seekId);
+    for (const seekId of [...existing.tracked.keys()]) {
+      await deleteTracked(channel, existing.tracked, seekId);
     }
   }
 }
@@ -186,8 +218,8 @@ export async function turnOffAnnounce(discordClient: Client, channelId: string):
 // that message can be found and deleted later - either on a graceful
 // shutdown, or as the first thing done when resuming this channel after a
 // restart, since by then it's no longer an accurate "just now" statement.
-export function recordConfirmationMessage(channelId: string, messageId: string): void {
-  setChannelAnnouncing(channelId, messageId);
+export function recordConfirmationMessage(channelId: string, messageId: string, quiet = false): void {
+  setChannelAnnouncing(channelId, messageId, quiet);
 }
 
 // Drops announcements for seeks that are no longer open. Needed because
@@ -197,7 +229,7 @@ export function recordConfirmationMessage(channelId: string, messageId: string):
 async function reconcile(discordClient: Client): Promise<void> {
   const openSeekIds = new Set(getSeekRegistry().list().map((seek) => seek.id));
 
-  for (const [channelId, tracked] of announcements) {
+  for (const [channelId, { tracked }] of announcements) {
     const channel = await fetchTextChannel(discordClient, channelId);
     if (!channel) continue;
     for (const seekId of [...tracked.keys()]) {
@@ -216,11 +248,11 @@ async function reconcile(discordClient: Client): Promise<void> {
 // first connect, not on every reconnect - see registerAnnouncer().
 export async function resumeAnnouncing(discordClient: Client): Promise<void> {
   const state = loadAnnounceState();
-  for (const [channelId, { confirmationMessageId }] of Object.entries(state)) {
+  for (const [channelId, { confirmationMessageId, quiet }] of Object.entries(state)) {
     const channel = await fetchTextChannel(discordClient, channelId);
     if (!channel) continue;
     await channel.messages.delete(confirmationMessageId).catch(() => {});
-    await activateChannel(discordClient, channel);
+    await activateChannel(discordClient, channel, quiet ?? false);
   }
 }
 
@@ -247,7 +279,7 @@ export function registerAnnouncer(playtak: PlaytakClient, discordClient: Client)
     // the seek turns out to have simply been cancelled.
     const removedRefs: SeekMessageRef[] = [];
 
-    for (const [channelId, tracked] of announcements) {
+    for (const [channelId, { tracked }] of announcements) {
       const channel = await fetchTextChannel(discordClient, channelId);
       if (!channel) continue;
 
@@ -271,7 +303,7 @@ export function registerAnnouncer(playtak: PlaytakClient, discordClient: Client)
     }
 
     if (event.type === 'seekRemove') {
-      notifySeekRemoved(discordClient, seek.player, removedRefs);
+      notifySeekRemoved(discordClient, seek, removedRefs);
     }
   });
 

@@ -25,7 +25,7 @@ function getStorePath(): string {
 }
 
 interface AnnounceState {
-  [channelId: string]: { confirmationMessageId: string };
+  [channelId: string]: { confirmationMessageId: string; quiet?: boolean };
 }
 
 function readState(): AnnounceState {
@@ -46,14 +46,28 @@ export function loadAnnounceState(): AnnounceState {
   return readState();
 }
 
-export function setChannelAnnouncing(channelId: string, confirmationMessageId: string): void {
+export function setChannelAnnouncing(channelId: string, confirmationMessageId: string, quiet = false): void {
   const state = readState();
-  state[channelId] = { confirmationMessageId };
+  state[channelId] = { confirmationMessageId, quiet };
   writeState(state);
 }
 
 export function clearChannelAnnouncing(channelId: string): void {
   const state = readState();
   delete state[channelId];
+  writeState(state);
+}
+
+// Flips the quiet flag on an already-announcing channel in place, leaving
+// its confirmation-message id untouched - used when /announce toggles
+// between "on" and "quiet" without a full off/on cycle (see announce.ts).
+// A no-op if the channel isn't in the persisted state at all (shouldn't
+// happen in practice - the caller only calls this on a channel it already
+// knows is announcing).
+export function setChannelQuiet(channelId: string, quiet: boolean): void {
+  const state = readState();
+  const entry = state[channelId];
+  if (!entry) return;
+  entry.quiet = quiet;
   writeState(state);
 }

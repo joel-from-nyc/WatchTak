@@ -8,7 +8,7 @@ import * as seeks from './commands/seeks';
 import * as spectate from './commands/spectate';
 import * as announce from './commands/announce';
 import { initPlaytak, getGameRegistry, getPlaytakClient } from './playtak/shared';
-import { registerWatcher, watchGame } from './playtak/watcher';
+import { registerWatcher, watchGame, getWatchedThread, reconstructThread } from './playtak/watcher';
 import { registerAnnouncer, shutdownAnnouncer } from './playtak/announcer';
 import { registerSeekToGame } from './playtak/seekToGame';
 
@@ -53,10 +53,11 @@ client.once('ready', (readyClient) => {
   registerSeekToGame(playtak, readyClient);
 });
 
-// customId shape "watch:<gameNo>" - set by seekToGame.ts's "Watch game"
-// button on its game-started notice. Lazily does exactly what /watch does:
-// nothing is created until someone actually clicks.
+// customId shapes set by seekToGame.ts's game-started notice buttons -
+// "watch:<gameNo>" while the game is live, "watch-review:<gameNo>" once it's
+// finished. Both are lazy: nothing is created until someone actually clicks.
 const WATCH_BUTTON_PATTERN = /^watch:(\d+)$/;
+const REVIEW_BUTTON_PATTERN = /^watch-review:(\d+)$/;
 
 client.on('interactionCreate', async (interaction) => {
   try {
@@ -68,23 +69,43 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isButton()) {
-      const match = WATCH_BUTTON_PATTERN.exec(interaction.customId);
-      if (!match) return;
+      const watchMatch = WATCH_BUTTON_PATTERN.exec(interaction.customId);
+      if (watchMatch) {
+        const gameNo = Number(watchMatch[1]);
+        const game = getGameRegistry().find(gameNo);
+        if (!game) {
+          await interaction.reply({ content: 'That game has already ended.', ephemeral: true });
+          return;
+        }
+        if (!(interaction.channel instanceof TextChannel)) {
+          await interaction.reply({ content: 'This only works in a text channel.', ephemeral: true });
+          return;
+        }
 
-      const gameNo = Number(match[1]);
-      const game = getGameRegistry().find(gameNo);
-      if (!game) {
-        await interaction.reply({ content: 'That game has already ended.', ephemeral: true });
+        await interaction.deferReply({ ephemeral: true });
+        const { thread, alreadyWatching } = await watchGame(getPlaytakClient(), interaction.channel, game);
+        await interaction.editReply(alreadyWatching ? `Already watching. Spectate: ${thread}` : `Spectate: ${thread}`);
         return;
       }
-      if (!(interaction.channel instanceof TextChannel)) {
-        await interaction.reply({ content: 'This only works in a text channel.', ephemeral: true });
-        return;
-      }
 
-      await interaction.deferReply({ ephemeral: true });
-      const { thread, alreadyWatching } = await watchGame(getPlaytakClient(), interaction.channel, game);
-      await interaction.editReply(alreadyWatching ? `Already watching. Spectate: ${thread}` : `Spectate: ${thread}`);
+      const reviewMatch = REVIEW_BUTTON_PATTERN.exec(interaction.customId);
+      if (reviewMatch) {
+        const gameNo = Number(reviewMatch[1]);
+
+        const existingThread = getWatchedThread(gameNo);
+        if (existingThread) {
+          await interaction.reply({ content: `Spectate: ${existingThread}`, ephemeral: true });
+          return;
+        }
+        if (!(interaction.channel instanceof TextChannel)) {
+          await interaction.reply({ content: 'This only works in a text channel.', ephemeral: true });
+          return;
+        }
+
+        await interaction.deferReply({ ephemeral: true });
+        const thread = await reconstructThread(interaction.channel, gameNo);
+        await interaction.editReply(thread ? `Spectate: ${thread}` : "Couldn't find a record of that game.");
+      }
     }
   } catch (err) {
     console.error('Error handling interaction:', err);

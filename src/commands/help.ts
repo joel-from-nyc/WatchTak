@@ -13,12 +13,14 @@ const HELP_TEXT = [
     'specific. Leave `<game>` blank to just see the active game list, same as `/list`.',
   '**/seeks** - Lists open public seeks on PlayTak - games anyone can join right now. Private challenges aimed ' +
     'at a specific opponent are left out, since only that person can accept them.',
-  '**/announce <on|off>** - Turns a live list of open seeks on or off in the channel you run it in; leave the ' +
-    'argument blank to check the current status without changing it. While on, I post here whenever a human opens ' +
-    'a new seek on PlayTak, and delete that message once it is taken or cancelled - so what you see is what you ' +
-    'can actually join. Seeks opened by bots are skipped (they sit open more or less permanently and would drown ' +
-    'out the rest), as are private challenges. Turning it off clears the list. Restricted to members with Manage ' +
-    'Channels by default; a server admin can change who can run it under Server Settings -> Integrations.',
+  '**/announce <on|off|quiet>** - Turns a live list of open public seeks on or off here; leave the argument ' +
+    'blank to check the current status. While on, I post here when a human opens a seek and delete that message ' +
+    'once it is taken or cancelled - so what you see is what you can actually join. I also post a notice with a ' +
+    'Watch button when a seek (or a private challenge, like a rematch) turns into a live game, switching to ' +
+    'Review once that game ends. `quiet` keeps the seek list but turns off those game-started notices. Bot ' +
+    'seeks are skipped entirely; private challenges skip the seek post but can still trigger a game-started ' +
+    'notice. Restricted to members with Manage Channels by default; change who can run it under Server ' +
+    'Settings -> Integrations.',
   '**/help** - Shows this list.',
 ].join('\n\n');
 

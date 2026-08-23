@@ -7,6 +7,7 @@ import { renderBoardPng } from './boardImage';
 import { describeResult } from './result';
 import { buildPtnNinjaLink } from './ptnLink';
 import { formatGameType, formatKomi } from './format';
+import { fetchArchivedGame } from './gameArchive';
 
 // How long to wait with no further place/spread messages before treating the
 // game as caught up to live play. On Observe, PlayTak immediately replays
@@ -101,14 +102,17 @@ function formatSeconds(totalSeconds: number): string {
 
 function timeText(state: WatchState): string | undefined {
   if (state.whiteSeconds === undefined || state.blackSeconds === undefined) return undefined;
-  return `${formatSeconds(state.whiteSeconds)}W, ${formatSeconds(state.blackSeconds)}B`;
+  return `${formatSeconds(state.whiteSeconds)}W | ${formatSeconds(state.blackSeconds)}B`;
 }
 
 // Adds a "Time:" field when remaining time is known - shared by every embed
 // kind below (move, catch-up, undo) so it always renders in the same spot.
-function addTimeField(embed: EmbedBuilder, state: WatchState): EmbedBuilder {
+// `bold` wraps the value in `**...**` - used by moveEmbed() so its interior
+// text matches the weight of the field headers; left plain elsewhere.
+function addTimeField(embed: EmbedBuilder, state: WatchState, bold = false): EmbedBuilder {
   const time = timeText(state);
-  return time ? embed.addFields({ name: 'Time:', value: time, inline: true }) : embed;
+  if (!time) return embed;
+  return embed.addFields({ name: 'Time:', value: bold ? `**${time}**` : time, inline: true });
 }
 
 // Embed for "this ply was just played" - used both when a move actually
@@ -129,10 +133,10 @@ function moveEmbed(state: WatchState, ply: number, ptn: string): EmbedBuilder {
   const colorLetter = isWhite ? 'W' : 'B';
   const embed = new EmbedBuilder().addFields({
     name: 'Move:',
-    value: `${moveNumber}${colorLetter}`,
+    value: `**${moveNumber}${colorLetter}**`,
     inline: true,
   });
-  addTimeField(embed, state);
+  addTimeField(embed, state, true);
   embed.addFields({ name: '​', value: `**${player} played: ${ptn}**`, inline: false });
   return embed;
 }
@@ -517,6 +521,90 @@ export async function watchGame(
   beginObserving(playtak, state);
 
   return { thread, alreadyWatching: false };
+}
+
+// Builds a Review thread for a finished game nobody watched live, from
+// PlayTak's public archive rather than the (now-gone) live WebSocket state -
+// see gameArchive.ts. Unlike watchGame()/beginObserving(), this never calls
+// Observe or arms any timers: the game is over, there's nothing to
+// subscribe to, only a record to lay out once. Returns undefined if the
+// archive has no record of this game (caller shows a generic error).
+export async function reconstructThread(parentChannel: TextChannel, gameNo: number): Promise<ThreadChannel | undefined> {
+  const archived = await fetchArchivedGame(gameNo);
+  if (!archived) return undefined;
+
+  const thread = await parentChannel.threads.create({
+    name: threadName(archived.white, archived.black, gameNo),
+    autoArchiveDuration: 1440,
+  });
+  watchedThreads.set(gameNo, thread);
+
+  // A lightweight WatchState - just enough for currentPositionEmbed()/
+  // postBoard() to render the final position. No live tracking fields are
+  // meaningful here (`live`/`historyMode` are unused off this path).
+  const state: WatchState = {
+    gameNo,
+    thread,
+    white: archived.white,
+    black: archived.black,
+    boardSize: archived.boardSize,
+    komi: archived.komi / 2,
+    plies: archived.plies,
+    live: true,
+    historyMode: 'newThread',
+  };
+
+  const minutes = Math.floor(archived.timeSeconds / 60);
+  const gameType = formatGameType(archived.unrated, archived.tournament);
+  const komiText = formatKomi(archived.komi);
+  await thread.send({
+    embeds: [
+      new EmbedBuilder()
+        .setTitle(`${archived.white} vs ${archived.black}`)
+        .setDescription(
+          `Reconstructed from PlayTak's archive - nobody was watching this game live.\n` +
+            `${archived.white} (white) vs ${archived.black} (black)`,
+        )
+        .addFields(
+          { name: 'Board', value: `${archived.boardSize}x${archived.boardSize}`, inline: true },
+          { name: 'Time', value: `${minutes}+${archived.incrementSeconds}`, inline: true },
+          { name: 'Komi', value: komiText, inline: true },
+          { name: 'Type', value: gameType, inline: true },
+        ),
+    ],
+  });
+
+  if (archived.plies.length > 0) {
+    await thread.send({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('Moves so far')
+          .setDescription(`\`\`\`\n${formatPtnMoveList(archived.plies)}\n\`\`\``),
+      ],
+    });
+  }
+  await postBoard(state, currentPositionEmbed(state));
+
+  const ptnLink = await buildPtnNinjaLink({
+    white: archived.white,
+    black: archived.black,
+    boardSize: archived.boardSize,
+    komi: state.komi,
+    result: archived.result,
+    plies: archived.plies,
+  });
+  await thread.send({
+    embeds: [
+      new EmbedBuilder()
+        .setTitle('Game Over')
+        .setDescription(
+          `**${describeResult(archived.result, archived.white, archived.black)}**\n\n` +
+            `**[View full game on ptn.ninja](${ptnLink})**`,
+        ),
+    ],
+  });
+
+  return thread;
 }
 
 async function hasAlreadyWarnedClose(thread: ThreadChannel): Promise<boolean> {
