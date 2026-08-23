@@ -17,7 +17,8 @@ const HELP_TEXT = [
     'argument blank to check the current status without changing it. While on, I post here whenever a human opens ' +
     'a new seek on PlayTak, and delete that message once it is taken or cancelled - so what you see is what you ' +
     'can actually join. Seeks opened by bots are skipped (they sit open more or less permanently and would drown ' +
-    'out the rest), as are private challenges. Turning it off clears the list.',
+    'out the rest), as are private challenges. Turning it off clears the list. Restricted to members with Manage ' +
+    'Channels by default; a server admin can change who can run it under Server Settings -> Integrations.',
   '**/help** - Shows this list.',
 ].join('\n\n');
 

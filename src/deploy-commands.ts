@@ -8,13 +8,19 @@ import * as seeks from './commands/seeks';
 import * as spectate from './commands/spectate';
 import * as announce from './commands/announce';
 
-dotenv.config();
+// Same env-file selection as index.ts - which instance's commands get
+// registered depends on which env file is loaded, so this must be explicit
+// rather than always registering whatever `.env` happens to contain.
+const envFile = process.argv[2] ?? '.env';
+dotenv.config({ path: envFile });
 
 const { DISCORD_TOKEN, DISCORD_CLIENT_ID, DISCORD_GUILD_ID } = process.env;
 
 if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID) {
-  throw new Error('DISCORD_TOKEN and DISCORD_CLIENT_ID must be set in .env');
+  throw new Error(`DISCORD_TOKEN and DISCORD_CLIENT_ID must be set in ${envFile}`);
 }
+
+console.log(`Using ${envFile} - guild ${DISCORD_GUILD_ID ?? '(none, global)'}`);
 
 const commands = [
   ping.data.toJSON(),

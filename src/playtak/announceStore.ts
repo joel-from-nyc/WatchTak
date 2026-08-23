@@ -9,7 +9,20 @@ import path from 'path';
 //
 // __dirname is src/playtak (ts-node) or dist/playtak (compiled) - either
 // way, two levels up is the project root.
-const STORE_PATH = path.join(__dirname, '..', '..', 'data', 'announce-state.json');
+//
+// Namespaced by DISCORD_GUILD_ID so more than one bot instance (e.g. a
+// production and a testing instance, both built from the same dist/ - see
+// index.ts's env-file argument) can run side by side without both
+// instances reading and clobbering the same file. Computed lazily inside
+// getStorePath() rather than as a module-level const, since index.ts loads
+// its env file (dotenv.config()) *after* this module is first required -
+// reading process.env.DISCORD_GUILD_ID at import time would always see it
+// as unset.
+function getStorePath(): string {
+  const guildId = process.env.DISCORD_GUILD_ID;
+  const filename = guildId ? `announce-state.${guildId}.json` : 'announce-state.json';
+  return path.join(__dirname, '..', '..', 'data', filename);
+}
 
 interface AnnounceState {
   [channelId: string]: { confirmationMessageId: string };
@@ -17,15 +30,16 @@ interface AnnounceState {
 
 function readState(): AnnounceState {
   try {
-    return JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'));
+    return JSON.parse(fs.readFileSync(getStorePath(), 'utf8'));
   } catch {
     return {};
   }
 }
 
 function writeState(state: AnnounceState): void {
-  fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true });
-  fs.writeFileSync(STORE_PATH, JSON.stringify(state, null, 2));
+  const storePath = getStorePath();
+  fs.mkdirSync(path.dirname(storePath), { recursive: true });
+  fs.writeFileSync(storePath, JSON.stringify(state, null, 2));
 }
 
 export function loadAnnounceState(): AnnounceState {

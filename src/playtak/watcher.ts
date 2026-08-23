@@ -1,4 +1,4 @@
-import { Client, TextChannel, ThreadChannel } from 'discord.js';
+import { Client, TextChannel, ThreadChannel, EmbedBuilder, AttachmentBuilder, Message } from 'discord.js';
 import { PlaytakClient } from './client';
 import { GameListEntry } from './protocol';
 import { GameRegistry } from './registry';
@@ -32,6 +32,18 @@ const CLOSE_WARNING_TEXT = 'This thread will be archived in 24 hours.';
 // Discord's own thread list - see sweepThreads().
 const THREAD_NAME_PATTERN = /\(#(\d+)\)$/;
 
+// One color per kind of update, so a thread reads as a sequence of distinct
+// event types at a glance rather than a wall of same-looking text.
+const COLOR_WATCH_START = 0x5865f2; // Discord blurple - thread opened
+const COLOR_MOVE_WHITE = 0xf5f5f0; // off-white - White's move
+const COLOR_MOVE_BLACK = 0x4a4a4a; // dark grey - Black's move
+const COLOR_CATCHUP = 0x3498db; // blue - reconstructing/showing current state
+const COLOR_UNDO = 0xe67e22; // orange - a correction to what was just shown
+const COLOR_GAME_OVER = 0xf1c40f; // gold - the thread's final update
+
+// A player is warned once their clock drops below this.
+const LOW_TIME_THRESHOLD_SECONDS = 60;
+
 interface WatchState {
   gameNo: number;
   thread: ThreadChannel;
@@ -59,6 +71,12 @@ interface WatchState {
   // thread already had text for before the disconnect (or, for a sweep
   // resume, before the restart - see findKnownPlyCount()).
   catchupFromPly?: number;
+  // Set while a "running low on time" post is showing a live countdown for
+  // the player currently to move. Only one can ever be relevant at a time,
+  // since the side not to move has a frozen clock. Cleared (and the message
+  // edited to a static line) the moment anything makes the countdown stale -
+  // a move landing, an undo, or the game ending - see resolveLowTimeWarning().
+  lowTimeWarning?: { message: Message; color: 'white' | 'black' };
 }
 
 // One bot instance only ever lives in one Discord server, so a game is only
@@ -81,19 +99,81 @@ function timeText(state: WatchState): string | undefined {
   return `${formatSeconds(state.whiteSeconds)}W, ${formatSeconds(state.blackSeconds)}B`;
 }
 
-// Text for "this ply was just played" - used both when a move actually
+// Adds a "Time" field when remaining time is known - shared by every embed
+// kind below (move, catch-up, undo) so it always renders in the same spot.
+function addTimeField(embed: EmbedBuilder, state: WatchState): EmbedBuilder {
+  const time = timeText(state);
+  return time ? embed.addFields({ name: 'Time', value: time, inline: true }) : embed;
+}
+
+// Embed for "this ply was just played" - used both when a move actually
 // just arrived live, and to redescribe the new current position after an
 // undo (see the gameUndo handling below), since from the thread's
 // perspective the ply now on top of `state.plies` reads the same either way.
-// Move/Time first, then the played line, to read top-to-bottom under the
-// board image as: board, move/time, played.
-function playedMoveText(state: WatchState, ply: number, ptn: string): string {
-  const player = ply % 2 === 0 ? state.white : state.black;
+// Title carries "Move <number><W/B>" and nothing else may use that exact
+// title shape - findKnownPlyCount() depends on it to recover ply counts
+// from thread history after a cold restart.
+function moveEmbed(state: WatchState, ply: number, ptn: string, color?: number): EmbedBuilder {
+  const isWhite = ply % 2 === 0;
+  const player = isWhite ? state.white : state.black;
   const moveNumber = Math.floor(ply / 2) + 1;
-  const colorLetter = ply % 2 === 0 ? 'W' : 'B';
-  const time = timeText(state);
-  const moveTimeLine = `**Move:** ${moveNumber}${colorLetter}` + (time ? ` | **Time:** ${time}` : '');
-  return `${moveTimeLine}\n**${player}** played **${ptn}**`;
+  const colorLetter = isWhite ? 'W' : 'B';
+  const embed = new EmbedBuilder()
+    .setColor(color ?? (isWhite ? COLOR_MOVE_WHITE : COLOR_MOVE_BLACK))
+    .setTitle(`Move ${moveNumber}${colorLetter}`)
+    .setDescription(`**${player}** played **${ptn}**`);
+  return addTimeField(embed, state);
+}
+
+// Embed for a bare "here's the board" post with no specific move attached -
+// the very first board of a game, or the state after an undo empties the
+// ply list entirely.
+function currentPositionEmbed(state: WatchState, color = COLOR_CATCHUP): EmbedBuilder {
+  const embed = new EmbedBuilder().setColor(color).setTitle('Current position');
+  return addTimeField(embed, state);
+}
+
+// Posts a live-countdown warning the first time the player to move drops
+// under LOW_TIME_THRESHOLD_SECONDS, using Discord's <t:UNIX:R> markup so the
+// countdown ticks on its own with no bot-side editing. A no-op if one is
+// already showing - only the first tick under the threshold posts anything,
+// not every gameTime update while still low.
+async function maybePostLowTimeWarning(state: WatchState): Promise<void> {
+  if (state.lowTimeWarning) return;
+
+  const isWhite = state.plies.length % 2 === 0;
+  const seconds = isWhite ? state.whiteSeconds : state.blackSeconds;
+  if (seconds === undefined || seconds >= LOW_TIME_THRESHOLD_SECONDS) return;
+
+  const player = isWhite ? state.white : state.black;
+  const deadline = Math.floor(Date.now() / 1000 + seconds);
+  const message = await state.thread
+    .send(`**${player}** is running low on time! <t:${deadline}:R>`)
+    .catch((err) => {
+      console.error(`Failed to post low-time warning for game #${state.gameNo}:`, err);
+      return null;
+    });
+  if (!message) return;
+
+  state.lowTimeWarning = { message, color: isWhite ? 'white' : 'black' };
+}
+
+// Replaces a live countdown with a static, no-longer-ticking readout the
+// moment it goes stale - a move landing, an undo, or the game ending. Only
+// one warning can exist at a time, so this always resolves whichever one is
+// pending regardless of what caused it, and is a no-op if none is pending.
+async function resolveLowTimeWarning(state: WatchState): Promise<void> {
+  const warning = state.lowTimeWarning;
+  if (!warning) return;
+  state.lowTimeWarning = undefined;
+
+  const player = warning.color === 'white' ? state.white : state.black;
+  const seconds = warning.color === 'white' ? state.whiteSeconds : state.blackSeconds;
+  const text =
+    seconds === undefined
+      ? `**${player}** was running low on time.`
+      : `**${player}** was running low on time (${formatSeconds(seconds)} left).`;
+  await warning.message.edit(text).catch(() => {});
 }
 
 async function closeThread(thread: ThreadChannel): Promise<void> {
@@ -103,17 +183,13 @@ async function closeThread(thread: ThreadChannel): Promise<void> {
   await thread.setLocked(true).catch(() => {});
 }
 
-// Text and board image in one message. Discord always renders a message's
-// own text above its attachments - there's no way to put the image first
-// within a single message - so the board ends up last regardless of field
-// order here; that's an accepted tradeoff for keeping this to one message
-// rather than two.
-async function postBoard(state: WatchState, content?: string): Promise<void> {
+// Board image as the embed's image, so it renders inside the same visual
+// block as the move/time text rather than as a separate bare attachment.
+async function postBoard(state: WatchState, embed: EmbedBuilder): Promise<void> {
   const png = renderBoardPng(state.boardSize, state.komi, state.plies, state.white, state.black);
-  await state.thread.send({
-    ...(content ? { content } : {}),
-    files: [{ attachment: png, name: 'board.png' }],
-  });
+  const attachment = new AttachmentBuilder(png, { name: 'board.png' });
+  embed.setImage('attachment://board.png');
+  await state.thread.send({ embeds: [embed], files: [attachment] });
 }
 
 function armSettleTimer(state: WatchState): void {
@@ -122,18 +198,32 @@ function armSettleTimer(state: WatchState): void {
     state.live = true;
     try {
       if (state.historyMode === 'newThread' && state.plies.length > 0) {
-        await state.thread.send(`\`\`\`\n${formatPtnMoveList(state.plies)}\n\`\`\``);
-        await postBoard(state, 'Current position.');
+        await state.thread.send({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(COLOR_CATCHUP)
+              .setTitle('Moves so far')
+              .setDescription(`\`\`\`\n${formatPtnMoveList(state.plies)}\n\`\`\``),
+          ],
+        });
+        await postBoard(state, currentPositionEmbed(state));
       } else if (state.historyMode === 'reconnect') {
         const missed = state.plies.slice(state.catchupFromPly ?? 0);
         // Nothing actually happened while disconnected - no catch-up
         // needed, so stay quiet rather than post a redundant board.
         if (missed.length > 0) {
-          await state.thread.send(`\`\`\`\n${formatPtnMoveList(missed, state.catchupFromPly ?? 0)}\n\`\`\``);
-          await postBoard(state, 'Current position.');
+          await state.thread.send({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(COLOR_CATCHUP)
+                .setTitle('Moves missed while disconnected')
+                .setDescription(`\`\`\`\n${formatPtnMoveList(missed, state.catchupFromPly ?? 0)}\n\`\`\``),
+            ],
+          });
+          await postBoard(state, currentPositionEmbed(state));
         }
       } else {
-        await postBoard(state, 'Current position.');
+        await postBoard(state, currentPositionEmbed(state));
       }
     } catch (err) {
       console.error(`Failed to post caught-up position for game #${state.gameNo}:`, err);
@@ -166,9 +256,17 @@ async function handleGameEnd(
     result,
     plies: state.plies,
   });
-  // Angle brackets suppress Discord's link-preview embed, leaving just the
-  // clickable link.
-  await state.thread.send(`**Game over.** ${resultText}\n<${ptnLink}>`).catch(() => {});
+  await resolveLowTimeWarning(state);
+  await state.thread
+    .send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(COLOR_GAME_OVER)
+          .setTitle('Game Over')
+          .setDescription(`${resultText}\n\n[View full game on ptn.ninja](${ptnLink})`),
+      ],
+    })
+    .catch(() => {});
   await scheduleClose(state.thread);
 
   activeWatches.delete(state.gameNo);
@@ -194,6 +292,7 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
     if (event.type === 'gameTime') {
       state.whiteSeconds = event.whiteSeconds;
       state.blackSeconds = event.blackSeconds;
+      if (state.live) await maybePostLowTimeWarning(state);
       return;
     }
 
@@ -225,12 +324,20 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
       }
 
       try {
-        await state.thread.send(`**${undoingPlayer}** took back their move.`);
+        await resolveLowTimeWarning(state);
+        await state.thread.send({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(COLOR_UNDO)
+              .setTitle('Move taken back')
+              .setDescription(`**${undoingPlayer}** took back their move.`),
+          ],
+        });
         if (state.plies.length === 0) {
-          await postBoard(state, 'Current position.');
+          await postBoard(state, currentPositionEmbed(state, COLOR_UNDO));
         } else {
           const ply = state.plies.length - 1;
-          await postBoard(state, playedMoveText(state, ply, state.plies[ply]));
+          await postBoard(state, moveEmbed(state, ply, state.plies[ply], COLOR_UNDO));
         }
       } catch (err) {
         console.error(`Failed to post undo for game #${event.gameNo}:`, err);
@@ -249,7 +356,8 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
     const ply = state.plies.length;
     state.plies.push(ptn);
     try {
-      await postBoard(state, playedMoveText(state, ply, ptn));
+      await resolveLowTimeWarning(state);
+      await postBoard(state, moveEmbed(state, ply, ptn));
     } catch (err) {
       console.error(`Failed to post move to thread for game #${event.gameNo}:`, err);
     }
@@ -332,10 +440,20 @@ export async function watchGame(
   const minutes = Math.floor(game.timeSeconds / 60);
   const gameType = formatGameType(game.unrated, game.tournament);
   const komi = formatKomi(game.komi);
-  await thread.send(
-    `Watching **${game.white}** (white) vs **${game.black}** (black) - ` +
-      `${game.boardSize}x${game.boardSize}, ${minutes}+${game.incrementSeconds}, ${komi} komi, ${gameType}.`,
-  );
+  await thread.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(COLOR_WATCH_START)
+        .setTitle(`${game.white} vs ${game.black}`)
+        .setDescription(`**${game.white}** (white) vs **${game.black}** (black)`)
+        .addFields(
+          { name: 'Board', value: `${game.boardSize}x${game.boardSize}`, inline: true },
+          { name: 'Time', value: `${minutes}+${game.incrementSeconds}`, inline: true },
+          { name: 'Komi', value: komi, inline: true },
+          { name: 'Type', value: gameType, inline: true },
+        ),
+    ],
+  });
 
   const state: WatchState = {
     gameNo: game.gameNo,
@@ -360,10 +478,10 @@ async function hasAlreadyWarnedClose(thread: ThreadChannel): Promise<boolean> {
   return recent.some((message) => message.content.includes(CLOSE_WARNING_TEXT));
 }
 
-// Matches the "**Move:** <number><W/B>" line every move/undo post carries
-// (see playedMoveText()) - the only place a ply number appears in the
-// thread's own history.
-const MOVE_LINE_PATTERN = /\*\*Move:\*\*\s*(\d+)([WB])/;
+// Matches the "Move <number><W/B>" embed title every move/undo post carries
+// (see moveEmbed()) - the only place a ply number appears in the thread's
+// own history.
+const MOVE_LINE_PATTERN = /^Move\s*(\d+)([WB])/;
 
 function plyFromMoveLine(moveNumber: number, colorLetter: string): number {
   return (moveNumber - 1) * 2 + (colorLetter === 'W' ? 0 : 1);
@@ -384,7 +502,7 @@ async function findKnownPlyCount(thread: ThreadChannel): Promise<number | undefi
 
   let highestPly: number | undefined;
   for (const message of recent.values()) {
-    const texts = [message.content, ...message.embeds.map((embed) => embed.description ?? '')];
+    const texts = message.embeds.map((embed) => embed.title ?? '');
     for (const text of texts) {
       const match = MOVE_LINE_PATTERN.exec(text);
       if (!match) continue;

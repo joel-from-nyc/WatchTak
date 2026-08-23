@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, PermissionFlagsBits } from 'discord.js';
 import { isAnnouncing, turnOnAnnounce, turnOffAnnounce, recordConfirmationMessage } from '../playtak/announcer';
 
 const ON_MESSAGE =
@@ -14,7 +14,11 @@ export const data = new SlashCommandBuilder()
       .setName('state')
       .setDescription('on or off - leave blank to check the current status')
       .addChoices({ name: 'on', value: 'on' }, { name: 'off', value: 'off' }),
-  );
+  )
+  // Baseline default - members need Manage Channels to run this. A server's
+  // admins can further restrict it to specific roles (or loosen it) anytime
+  // via Server Settings -> Integrations -> this bot, with no redeploy needed.
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels);
 
 export async function execute(interaction: ChatInputCommandInteraction) {
   const state = interaction.options.getString('state');

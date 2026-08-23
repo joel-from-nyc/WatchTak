@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Collection, ChatInputCommandInteraction } from 'discord.js';
+import { Client, GatewayIntentBits, Collection, ChatInputCommandInteraction, TextChannel } from 'discord.js';
 import dotenv from 'dotenv';
 import * as ping from './commands/ping';
 import * as list from './commands/list';
@@ -7,16 +7,21 @@ import * as help from './commands/help';
 import * as seeks from './commands/seeks';
 import * as spectate from './commands/spectate';
 import * as announce from './commands/announce';
-import { initPlaytak } from './playtak/shared';
-import { registerWatcher } from './playtak/watcher';
+import { initPlaytak, getGameRegistry, getPlaytakClient } from './playtak/shared';
+import { registerWatcher, watchGame } from './playtak/watcher';
 import { registerAnnouncer, shutdownAnnouncer } from './playtak/announcer';
+import { registerSeekToGame } from './playtak/seekToGame';
 
-dotenv.config();
+// Which .env file to load - defaults to plain .env, but a specific instance
+// (e.g. `node dist/index.js .env.production`) can point at its own file, so
+// a single build can run more than one bot instance (different token,
+// guild, and channel) without needing a separate checkout per instance.
+dotenv.config({ path: process.argv[2] ?? '.env' });
 
 const { DISCORD_TOKEN } = process.env;
 
 if (!DISCORD_TOKEN) {
-  throw new Error('DISCORD_TOKEN must be set in .env');
+  throw new Error('DISCORD_TOKEN must be set in the env file (see package.json start scripts for which one)');
 }
 
 // Intents declare which events Discord will send us. Keep this list minimal -
@@ -45,22 +50,48 @@ client.once('ready', (readyClient) => {
   const { client: playtak, gameRegistry } = initPlaytak();
   registerWatcher(playtak, readyClient, gameRegistry);
   registerAnnouncer(playtak, readyClient);
+  registerSeekToGame(playtak, readyClient);
 });
 
+// customId shape "watch:<gameNo>" - set by seekToGame.ts's "Watch game"
+// button on its game-started notice. Lazily does exactly what /watch does:
+// nothing is created until someone actually clicks.
+const WATCH_BUTTON_PATTERN = /^watch:(\d+)$/;
+
 client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  const command = commands.get(interaction.commandName);
-  if (!command) return;
-
   try {
-    await command.execute(interaction);
+    if (interaction.isChatInputCommand()) {
+      const command = commands.get(interaction.commandName);
+      if (!command) return;
+      await command.execute(interaction);
+      return;
+    }
+
+    if (interaction.isButton()) {
+      const match = WATCH_BUTTON_PATTERN.exec(interaction.customId);
+      if (!match) return;
+
+      const gameNo = Number(match[1]);
+      const game = getGameRegistry().find(gameNo);
+      if (!game) {
+        await interaction.reply({ content: 'That game has already ended.', ephemeral: true });
+        return;
+      }
+      if (!(interaction.channel instanceof TextChannel)) {
+        await interaction.reply({ content: 'This only works in a text channel.', ephemeral: true });
+        return;
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+      const { thread, alreadyWatching } = await watchGame(getPlaytakClient(), interaction.channel, game);
+      await interaction.editReply(alreadyWatching ? `Already watching. Spectate: ${thread}` : `Spectate: ${thread}`);
+    }
   } catch (err) {
-    console.error(`Error running command ${interaction.commandName}:`, err);
+    console.error('Error handling interaction:', err);
     const errorReply = { content: 'Something went wrong running that command.', ephemeral: true };
-    if (interaction.replied || interaction.deferred) {
+    if (interaction.isRepliable() && (interaction.replied || interaction.deferred)) {
       await interaction.followUp(errorReply);
-    } else {
+    } else if (interaction.isRepliable()) {
       await interaction.reply(errorReply);
     }
   }

@@ -4,6 +4,7 @@ import { Seek } from './protocol';
 import { getSeekRegistry } from './shared';
 import { loadAnnounceState, setChannelAnnouncing, clearChannelAnnouncing } from './announceStore';
 import { formatGameType, formatKomi, formatSeekColor } from './format';
+import { notifySeekRemoved } from './seekToGame';
 
 // How long to let PlayTak's post-(re)connect burst of `Seek new` lines land
 // before reconciling or resuming. On every (re)connect the server replays
@@ -57,7 +58,7 @@ export function isAnnouncing(channelId: string): boolean {
   return announcements.has(channelId);
 }
 
-async function fetchTextChannel(discordClient: Client, channelId: string): Promise<TextChannel | null> {
+export async function fetchTextChannel(discordClient: Client, channelId: string): Promise<TextChannel | null> {
   const channel = await discordClient.channels.fetch(channelId).catch(() => null);
   return channel instanceof TextChannel ? channel : null;
 }
@@ -226,12 +227,18 @@ export function registerAnnouncer(playtak: PlaytakClient, discordClient: Client)
     if (event.type !== 'seekNew' && event.type !== 'seekRemove') return;
 
     const seek = event.seek;
+    // Channels that were actually showing this seek, captured before
+    // deleteTracked() removes it - used below to tell seekToGame.ts where a
+    // "game started" notice could even be posted, since a seek that was
+    // never announced anywhere obviously can't spawn one there.
+    const announcingChannelIds: string[] = [];
 
     for (const [channelId, tracked] of announcements) {
       const channel = await fetchTextChannel(discordClient, channelId);
       if (!channel) continue;
 
       if (event.type === 'seekRemove') {
+        if (tracked.has(seek.id)) announcingChannelIds.push(channelId);
         await deleteTracked(channel, tracked, seek.id);
         continue;
       }
@@ -243,6 +250,10 @@ export function registerAnnouncer(playtak: PlaytakClient, discordClient: Client)
       if (!isAnnounceable(seek)) continue;
 
       await postSeek(channel, tracked, seek);
+    }
+
+    if (event.type === 'seekRemove') {
+      notifySeekRemoved(discordClient, seek.player, announcingChannelIds);
     }
   });
 
