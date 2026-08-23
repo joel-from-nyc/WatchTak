@@ -1,6 +1,6 @@
 import { Client, TextChannel, ThreadChannel, AttachmentBuilder, Message } from 'discord.js';
 import { PlaytakClient } from './client';
-import { GameListEntry } from './protocol';
+import { GameListEntry, PlaytakEvent } from './protocol';
 import { GameRegistry } from './registry';
 import { placeToPtn, spreadToPtn, formatPtnMoveList } from './ptn';
 import { renderBoardPng } from './boardImage';
@@ -384,90 +384,111 @@ async function handleGameEnd(
   playtak.send(`Unobserve ${state.gameNo}`);
 }
 
-export function registerWatcher(playtak: PlaytakClient, discordClient: Client, registry: GameRegistry): void {
-  playtak.on('event', async (event) => {
-    if (
-      event.type !== 'gamePlace' &&
-      event.type !== 'gameSpread' &&
-      event.type !== 'gameOver' &&
-      event.type !== 'gameAbandoned' &&
-      event.type !== 'gameTime' &&
-      event.type !== 'gameUndo'
-    ) {
-      return;
-    }
+// Handles one PlaytakEvent for the watcher. Extracted so registerWatcher()
+// can run these strictly one at a time (see the queue below) rather than
+// letting Node invoke this listener again for the next event before this
+// one's awaited Discord API calls (postBoard's render+send is not cheap)
+// have finished - without that, two events for the same fast-moving game
+// (e.g. a move landing right as the other side's low-time warning is still
+// mid-send) can both read/mutate the same WatchState concurrently, which is
+// exactly what produced a duplicate low-time warning in testing: two
+// scheduleLowTimeWarning() calls both ended up targeting the same player
+// because the second one ran before the first's state updates had settled.
+async function handleWatcherEvent(playtak: PlaytakClient, event: PlaytakEvent): Promise<void> {
+  if (
+    event.type !== 'gamePlace' &&
+    event.type !== 'gameSpread' &&
+    event.type !== 'gameOver' &&
+    event.type !== 'gameAbandoned' &&
+    event.type !== 'gameTime' &&
+    event.type !== 'gameUndo'
+  ) {
+    return;
+  }
 
-    const state = activeWatches.get(event.gameNo);
-    if (!state) return;
+  const state = activeWatches.get(event.gameNo);
+  if (!state) return;
 
-    if (event.type === 'gameTime') {
-      state.whiteSeconds = event.whiteSeconds;
-      state.blackSeconds = event.blackSeconds;
-      return;
-    }
+  if (event.type === 'gameTime') {
+    state.whiteSeconds = event.whiteSeconds;
+    state.blackSeconds = event.blackSeconds;
+    return;
+  }
 
-    if (event.type === 'gameOver') {
-      await handleGameEnd(playtak, state, describeResult(event.result, state.white, state.black), event.result);
-      return;
-    }
-    if (event.type === 'gameAbandoned') {
-      await handleGameEnd(playtak, state, `${event.quittingPlayer} abandoned the game.`);
-      return;
-    }
+  if (event.type === 'gameOver') {
+    await handleGameEnd(playtak, state, describeResult(event.result, state.white, state.black), event.result);
+    return;
+  }
+  if (event.type === 'gameAbandoned') {
+    await handleGameEnd(playtak, state, `${event.quittingPlayer} abandoned the game.`);
+    return;
+  }
 
-    if (event.type === 'gameUndo') {
-      // Nothing recorded yet to take back (e.g. an undo arriving mid
-      // history-replay before any ply landed) - ignore rather than pop an
-      // empty array.
-      if (state.plies.length === 0) return;
+  if (event.type === 'gameUndo') {
+    // Nothing recorded yet to take back (e.g. an undo arriving mid
+    // history-replay before any ply landed) - ignore rather than pop an
+    // empty array.
+    if (state.plies.length === 0) return;
 
-      const undonePly = state.plies.length - 1;
-      const undoingPlayer = undonePly % 2 === 0 ? state.white : state.black;
-      state.plies.pop();
+    const undonePly = state.plies.length - 1;
+    const undoingPlayer = undonePly % 2 === 0 ? state.white : state.black;
+    state.plies.pop();
 
-      // Still catching up on history - just correct the buffered plies and
-      // let the settle timer's eventual catch-up post reflect the result;
-      // no live announcement to make yet.
-      if (!state.live) {
-        armSettleTimer(state);
-        return;
-      }
-
-      try {
-        await resolveLowTimeWarning(state);
-        await state.thread.send(codeBlock(['Move taken back', '', `${undoingPlayer} took back their move.`]));
-        if (state.plies.length === 0) {
-          await postBoard(state, currentPositionText(state));
-        } else {
-          const ply = state.plies.length - 1;
-          await postBoard(state, moveText(state, ply, state.plies[ply]));
-        }
-      } catch (err) {
-        console.error(`Failed to post undo for game #${event.gameNo}:`, err);
-      }
-      scheduleLowTimeWarning(state);
-      return;
-    }
-
-    const ptn = event.type === 'gamePlace' ? placeToPtn(event.move) : spreadToPtn(event.move);
-
+    // Still catching up on history - just correct the buffered plies and
+    // let the settle timer's eventual catch-up post reflect the result;
+    // no live announcement to make yet.
     if (!state.live) {
-      state.plies.push(ptn);
       armSettleTimer(state);
       return;
     }
 
-    const ply = state.plies.length;
-    state.plies.push(ptn);
     try {
       await resolveLowTimeWarning(state);
-      await postBoard(state, moveText(state, ply, ptn));
+      await state.thread.send(codeBlock(['Move taken back', '', `${undoingPlayer} took back their move.`]));
+      if (state.plies.length === 0) {
+        await postBoard(state, currentPositionText(state));
+      } else {
+        const ply = state.plies.length - 1;
+        await postBoard(state, moveText(state, ply, state.plies[ply]));
+      }
     } catch (err) {
-      console.error(`Failed to post move to thread for game #${event.gameNo}:`, err);
+      console.error(`Failed to post undo for game #${event.gameNo}:`, err);
     }
-    // The turn just changed hands - arm the next warning against whoever is
-    // now on the clock.
     scheduleLowTimeWarning(state);
+    return;
+  }
+
+  const ptn = event.type === 'gamePlace' ? placeToPtn(event.move) : spreadToPtn(event.move);
+
+  if (!state.live) {
+    state.plies.push(ptn);
+    armSettleTimer(state);
+    return;
+  }
+
+  const ply = state.plies.length;
+  state.plies.push(ptn);
+  try {
+    await resolveLowTimeWarning(state);
+    await postBoard(state, moveText(state, ply, ptn));
+  } catch (err) {
+    console.error(`Failed to post move to thread for game #${event.gameNo}:`, err);
+  }
+  // The turn just changed hands - arm the next warning against whoever is
+  // now on the clock.
+  scheduleLowTimeWarning(state);
+}
+
+export function registerWatcher(playtak: PlaytakClient, discordClient: Client, registry: GameRegistry): void {
+  // Chains every event through one FIFO queue so handleWatcherEvent() calls
+  // never overlap - see its doc comment for why that matters.
+  let eventQueue: Promise<void> = Promise.resolve();
+  playtak.on('event', (event) => {
+    eventQueue = eventQueue
+      .then(() => handleWatcherEvent(playtak, event))
+      .catch((err) => {
+        console.error('Error handling PlayTak event in watcher:', err);
+      });
   });
 
   // A dropped/reconnected WebSocket loses every server-side Observe
