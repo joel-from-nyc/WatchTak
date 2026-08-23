@@ -68,11 +68,25 @@ interface WatchState {
   // edited to a static line) the moment anything makes the countdown stale -
   // a move landing, an undo, or the game ending - see resolveLowTimeWarning().
   lowTimeWarning?: { message: Message; color: 'white' | 'black' };
+  // Pending timer that will post the warning when the player on the clock
+  // crosses the threshold mid-think - see scheduleLowTimeWarning().
+  lowTimeTimer?: NodeJS.Timeout;
 }
 
 // One bot instance only ever lives in one Discord server, so a game is only
 // ever watched from one place - keyed by PlayTak game number alone.
 const activeWatches = new Map<number, WatchState>();
+
+// Threads this process has opened, kept keyed by game number even after the
+// game ends and its watch is torn down, so a "Review" link can still point at
+// the thread afterwards (see seekToGame.ts). Bounded by how many games this
+// process watched, and deliberately not persisted - after a restart there's
+// no live notice left to relink anyway.
+const watchedThreads = new Map<number, ThreadChannel>();
+
+export function getWatchedThread(gameNo: number): ThreadChannel | undefined {
+  return watchedThreads.get(gameNo);
+}
 
 function threadName(white: string, black: string, gameNo: number): string {
   return `${white} vs ${black} (#${gameNo})`;
@@ -90,35 +104,36 @@ function timeText(state: WatchState): string | undefined {
   return `${formatSeconds(state.whiteSeconds)}W, ${formatSeconds(state.blackSeconds)}B`;
 }
 
-// Adds a "Time" field when remaining time is known - shared by every embed
+// Adds a "Time:" field when remaining time is known - shared by every embed
 // kind below (move, catch-up, undo) so it always renders in the same spot.
 function addTimeField(embed: EmbedBuilder, state: WatchState): EmbedBuilder {
   const time = timeText(state);
-  return time ? embed.addFields({ name: 'Time', value: time, inline: true }) : embed;
+  return time ? embed.addFields({ name: 'Time:', value: time, inline: true }) : embed;
 }
 
 // Embed for "this ply was just played" - used both when a move actually
 // just arrived live, and to redescribe the new current position after an
 // undo (see the gameUndo handling below), since from the thread's
 // perspective the ply now on top of `state.plies` reads the same either way.
-// "Move" and "Time" are separate inline fields so they sit side by side on
+// "Move:" and "Time:" are separate inline fields so they sit side by side on
 // one row, with the played-move text as a third, unlabeled field below them
 // (a blank field name forces it onto its own row rather than sharing the
-// Move/Time row). The Move field's value carries the bare "<number><W/B>" -
-// findKnownPlyCount() depends on that exact shape to recover ply counts from
-// thread history after a cold restart.
+// Move/Time row). That body line is bold so it reads at the same weight as
+// the field headers above it. The Move field's value carries the bare
+// "<number><W/B>" - findKnownPlyCount() depends on that exact shape to
+// recover ply counts from thread history after a cold restart.
 function moveEmbed(state: WatchState, ply: number, ptn: string): EmbedBuilder {
   const isWhite = ply % 2 === 0;
   const player = isWhite ? state.white : state.black;
   const moveNumber = Math.floor(ply / 2) + 1;
   const colorLetter = isWhite ? 'W' : 'B';
   const embed = new EmbedBuilder().addFields({
-    name: 'Move',
+    name: 'Move:',
     value: `${moveNumber}${colorLetter}`,
     inline: true,
   });
   addTimeField(embed, state);
-  embed.addFields({ name: '​', value: `${player} played ${ptn}`, inline: false });
+  embed.addFields({ name: '​', value: `**${player} played: ${ptn}**`, inline: false });
   return embed;
 }
 
@@ -130,22 +145,51 @@ function currentPositionEmbed(state: WatchState): EmbedBuilder {
   return addTimeField(embed, state);
 }
 
-// Posts a live-countdown warning the first time the player to move drops
-// under LOW_TIME_THRESHOLD_SECONDS, using Discord's <t:UNIX:R> markup so the
-// countdown ticks on its own with no bot-side editing. A no-op if one is
-// already showing - only the first tick under the threshold posts anything,
-// not every gameTime update while still low.
-async function maybePostLowTimeWarning(state: WatchState): Promise<void> {
-  if (state.lowTimeWarning) return;
+function clearLowTimeTimer(state: WatchState): void {
+  if (state.lowTimeTimer) clearTimeout(state.lowTimeTimer);
+  state.lowTimeTimer = undefined;
+}
+
+// Schedules the "running low on time" post for whoever is on the clock right
+// now. This has to be timer-driven rather than reactive: PlayTak only pushes
+// a clock update at move boundaries (one `Timems` immediately before each
+// move message, carrying the post-move values) and sends nothing at all while
+// a player is thinking - confirmed by observing live traffic, where an
+// 18-second turn produced zero clock messages. So waiting for an update to
+// tell us someone dropped under a minute would only ever catch a player who
+// was *already* low when their turn began, never the long think that burns a
+// healthy clock down - which is exactly the moment worth announcing.
+//
+// Instead, the clock at turn start tells us precisely when this player will
+// cross the threshold, and when they'd flag if they never moved, so both the
+// post and its countdown target are computed up front.
+function scheduleLowTimeWarning(state: WatchState): void {
+  clearLowTimeTimer(state);
+  if (!state.live) return;
 
   const isWhite = state.plies.length % 2 === 0;
   const seconds = isWhite ? state.whiteSeconds : state.blackSeconds;
-  if (seconds === undefined || seconds >= LOW_TIME_THRESHOLD_SECONDS) return;
+  if (seconds === undefined) return;
+
+  const flagAtMs = Date.now() + seconds * 1000;
+  const delayMs = Math.max(0, (seconds - LOW_TIME_THRESHOLD_SECONDS) * 1000);
+  state.lowTimeTimer = setTimeout(() => {
+    state.lowTimeTimer = undefined;
+    postLowTimeWarning(state, isWhite, flagAtMs).catch((err) => {
+      console.error(`Failed to post low-time warning for game #${state.gameNo}:`, err);
+    });
+  }, delayMs);
+}
+
+// `<t:UNIX:R>` renders as a live relative countdown that ticks in the client
+// with no further edits from us, so the post stays accurate on its own until
+// something resolves it.
+async function postLowTimeWarning(state: WatchState, isWhite: boolean, flagAtMs: number): Promise<void> {
+  if (state.lowTimeWarning) return;
 
   const player = isWhite ? state.white : state.black;
-  const deadline = Math.floor(Date.now() / 1000 + seconds);
   const message = await state.thread
-    .send(`${player} is running low on time! <t:${deadline}:R>`)
+    .send(`${player} is running low on time! Flags <t:${Math.floor(flagAtMs / 1000)}:R>`)
     .catch((err) => {
       console.error(`Failed to post low-time warning for game #${state.gameNo}:`, err);
       return null;
@@ -160,6 +204,7 @@ async function maybePostLowTimeWarning(state: WatchState): Promise<void> {
 // one warning can exist at a time, so this always resolves whichever one is
 // pending regardless of what caused it, and is a no-op if none is pending.
 async function resolveLowTimeWarning(state: WatchState): Promise<void> {
+  clearLowTimeTimer(state);
   const warning = state.lowTimeWarning;
   if (!warning) return;
   state.lowTimeWarning = undefined;
@@ -223,11 +268,15 @@ function armSettleTimer(state: WatchState): void {
     } catch (err) {
       console.error(`Failed to post caught-up position for game #${state.gameNo}:`, err);
     }
+    // Someone may already be deep into a think when we start watching, so arm
+    // the warning here too rather than waiting for the next move to land.
+    scheduleLowTimeWarning(state);
   }, HISTORY_SETTLE_MS);
 }
 
 function beginObserving(playtak: PlaytakClient, state: WatchState): void {
   activeWatches.set(state.gameNo, state);
+  watchedThreads.set(state.gameNo, state.thread);
   armSettleTimer(state);
   playtak.send(`Observe ${state.gameNo}`);
 }
@@ -257,7 +306,7 @@ async function handleGameEnd(
       embeds: [
         new EmbedBuilder()
           .setTitle('Game Over')
-          .setDescription(`${resultText}\n\n[View full game on ptn.ninja](${ptnLink})`),
+          .setDescription(`**${resultText}**\n\n**[View full game on ptn.ninja](${ptnLink})**`),
       ],
     })
     .catch(() => {});
@@ -286,7 +335,6 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
     if (event.type === 'gameTime') {
       state.whiteSeconds = event.whiteSeconds;
       state.blackSeconds = event.blackSeconds;
-      if (state.live) await maybePostLowTimeWarning(state);
       return;
     }
 
@@ -333,6 +381,7 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
       } catch (err) {
         console.error(`Failed to post undo for game #${event.gameNo}:`, err);
       }
+      scheduleLowTimeWarning(state);
       return;
     }
 
@@ -352,6 +401,9 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
     } catch (err) {
       console.error(`Failed to post move to thread for game #${event.gameNo}:`, err);
     }
+    // The turn just changed hands - arm the next warning against whoever is
+    // now on the clock.
+    scheduleLowTimeWarning(state);
   });
 
   // A dropped/reconnected WebSocket loses every server-side Observe
@@ -378,6 +430,10 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
       }
       state.live = false;
       state.plies = [];
+      // Any pending warning timer was armed against a ply count that's about
+      // to be rebuilt from scratch by the replay - drop it and let the
+      // post-catch-up scheduling arm a fresh one.
+      clearLowTimeTimer(state);
       beginObserving(playtak, state);
     }
   });
@@ -419,6 +475,7 @@ export async function watchGame(
       return { thread: existing.thread, alreadyWatching: true };
     }
     if (existing.settleTimer) clearTimeout(existing.settleTimer);
+    clearLowTimeTimer(existing);
     activeWatches.delete(game.gameNo);
     playtak.send(`Unobserve ${game.gameNo}`);
   }
@@ -492,8 +549,10 @@ async function findKnownPlyCount(thread: ThreadChannel): Promise<number | undefi
 
   let highestPly: number | undefined;
   for (const message of recent.values()) {
+    // 'Move' without the colon is the older field name - still matched so a
+    // thread posted to before that rename can still be resumed.
     const texts = message.embeds.flatMap((embed) =>
-      embed.fields.filter((field) => field.name === 'Move').map((field) => field.value),
+      embed.fields.filter((field) => field.name === 'Move:' || field.name === 'Move').map((field) => field.value),
     );
     for (const text of texts) {
       const match = MOVE_LINE_PATTERN.exec(text);

@@ -4,7 +4,7 @@ import { Seek } from './protocol';
 import { getSeekRegistry } from './shared';
 import { loadAnnounceState, setChannelAnnouncing, clearChannelAnnouncing } from './announceStore';
 import { formatGameType, formatKomi, formatSeekColor } from './format';
-import { notifySeekRemoved } from './seekToGame';
+import { notifySeekRemoved, SeekMessageRef } from './seekToGame';
 
 // How long to let PlayTak's post-(re)connect burst of `Seek new` lines land
 // before reconciling or resuming. On every (re)connect the server replays
@@ -87,6 +87,20 @@ async function postSeek(channel: TextChannel, tracked: Map<number, string>, seek
     return;
   }
   tracked.set(seek.id, message.id);
+}
+
+// Hands a tracked seek's message off to the caller and stops tracking it,
+// without deleting anything - used on `Seek remove`, where the message isn't
+// necessarily rubbish: if the seek was taken rather than cancelled it gets
+// edited in place into a "game started" notice instead (see seekToGame.ts).
+// Returns undefined when there's nothing to hand over, including the
+// still-being-sent case, which stays on deleteTracked's PENDING_REMOVED path
+// since there's no message id to give out yet.
+function takeTracked(tracked: Map<number, string>, seekId: number): string | undefined {
+  const messageId = tracked.get(seekId);
+  if (!messageId || messageId === PENDING || messageId === PENDING_REMOVED) return undefined;
+  tracked.delete(seekId);
+  return messageId;
 }
 
 async function deleteTracked(channel: TextChannel, tracked: Map<number, string>, seekId: number): Promise<void> {
@@ -227,19 +241,23 @@ export function registerAnnouncer(playtak: PlaytakClient, discordClient: Client)
     if (event.type !== 'seekNew' && event.type !== 'seekRemove') return;
 
     const seek = event.seek;
-    // Channels that were actually showing this seek, captured before
-    // deleteTracked() removes it - used below to tell seekToGame.ts where a
-    // "game started" notice could even be posted, since a seek that was
-    // never announced anywhere obviously can't spawn one there.
-    const announcingChannelIds: string[] = [];
+    // The announcement messages that were advertising this seek. On removal
+    // they're handed to seekToGame.ts rather than deleted here, since it can
+    // still turn them into "game started" notices - it deletes them itself if
+    // the seek turns out to have simply been cancelled.
+    const removedRefs: SeekMessageRef[] = [];
 
     for (const [channelId, tracked] of announcements) {
       const channel = await fetchTextChannel(discordClient, channelId);
       if (!channel) continue;
 
       if (event.type === 'seekRemove') {
-        if (tracked.has(seek.id)) announcingChannelIds.push(channelId);
-        await deleteTracked(channel, tracked, seek.id);
+        const messageId = takeTracked(tracked, seek.id);
+        if (messageId) {
+          removedRefs.push({ channelId, messageId });
+        } else {
+          await deleteTracked(channel, tracked, seek.id);
+        }
         continue;
       }
 
@@ -253,7 +271,7 @@ export function registerAnnouncer(playtak: PlaytakClient, discordClient: Client)
     }
 
     if (event.type === 'seekRemove') {
-      notifySeekRemoved(discordClient, seek.player, announcingChannelIds);
+      notifySeekRemoved(discordClient, seek.player, removedRefs);
     }
   });
 
