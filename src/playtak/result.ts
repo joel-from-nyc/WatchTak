@@ -11,17 +11,17 @@ export function describeResult(result: string, white: string, black: string): st
     case '1/2-1/2':
       return 'Draw.';
     case 'R-0':
-      return `**${white}** wins by road!`;
+      return `${white} wins by road!`;
     case '0-R':
-      return `**${black}** wins by road!`;
+      return `${black} wins by road!`;
     case 'F-0':
-      return `**${white}** wins by flats.`;
+      return `${white} wins by flats.`;
     case '0-F':
-      return `**${black}** wins by flats.`;
+      return `${black} wins by flats.`;
     case '1-0':
-      return `**${white}** wins. (${result})`;
+      return `${white} wins. (${result})`;
     case '0-1':
-      return `**${black}** wins. (${result})`;
+      return `${black} wins. (${result})`;
     case '0-0':
       return 'Game aborted, no result.';
     default:
