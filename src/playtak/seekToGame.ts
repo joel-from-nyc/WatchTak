@@ -77,7 +77,7 @@ async function convertToGameNotice(
   game: GameListEntry,
   refs: SeekMessageRef[],
 ): Promise<void> {
-  const content = `**${game.white}** vs **${game.black}** has started!`;
+  const content = `**${game.white}** vs **${game.black}** (#${game.gameNo}) has started!`;
   const landed: SeekMessageRef[] = [];
 
   for (const ref of refs) {
@@ -102,7 +102,7 @@ async function convertToGameNotice(
 // in quiet mode, so it behaves the same as a converted one from here on
 // (same retirement/pruning path, same button).
 async function postFreshGameNotice(discordClient: Client, game: GameListEntry): Promise<void> {
-  const content = `**${game.white}** vs **${game.black}** has started!`;
+  const content = `**${game.white}** vs **${game.black}** (#${game.gameNo}) has started!`;
   const landed: SeekMessageRef[] = [];
 
   for (const channelId of listAnnouncingChannelIds({ excludeQuiet: true })) {

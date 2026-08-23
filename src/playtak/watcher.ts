@@ -1,4 +1,4 @@
-import { Client, TextChannel, ThreadChannel, EmbedBuilder, AttachmentBuilder, Message } from 'discord.js';
+import { Client, TextChannel, ThreadChannel, AttachmentBuilder, Message } from 'discord.js';
 import { PlaytakClient } from './client';
 import { GameListEntry } from './protocol';
 import { GameRegistry } from './registry';
@@ -45,6 +45,12 @@ interface WatchState {
   komi: number;
   plies: string[];
   live: boolean;
+  // Column width every "Label: value" line in this thread pads its label to
+  // (see alignedLine()) - computed once from both player names so the
+  // colon column stays in the same place across every message in the
+  // thread, rather than shifting depending on whose (differently-sized)
+  // name is on a given line. See computeMoveLabelWidth().
+  moveLabelWidth: number;
   // Most recently known remaining time, from Game#<no> Time events.
   // Undefined until the first one arrives.
   whiteSeconds?: number;
@@ -100,53 +106,99 @@ function formatSeconds(totalSeconds: number): string {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
-function timeText(state: WatchState): string | undefined {
-  if (state.whiteSeconds === undefined || state.blackSeconds === undefined) return undefined;
-  return `${formatSeconds(state.whiteSeconds)}W | ${formatSeconds(state.blackSeconds)}B`;
+// Every "Label: value" line in a thread pads its label to the same width, so
+// the colon column lines up down the whole message history rather than
+// shifting message-to-message with whoever's name is on a given line (see
+// WatchState.moveLabelWidth). Computed once, from the labels that actually
+// appear across a game's messages: "Move", "White Time", "Black Time", and
+// "<player> played" for both sides - whichever is longest sets the width.
+function computeMoveLabelWidth(white: string, black: string): number {
+  return Math.max(
+    'Move'.length,
+    'White Time'.length,
+    'Black Time'.length,
+    `${white} played`.length,
+    `${black} played`.length,
+  );
 }
 
-// Adds a "Time:" field when remaining time is known - shared by every embed
-// kind below (move, catch-up, undo) so it always renders in the same spot.
-// `bold` wraps the value in `**...**` - used by moveEmbed() so its interior
-// text matches the weight of the field headers; left plain elsewhere.
-function addTimeField(embed: EmbedBuilder, state: WatchState, bold = false): EmbedBuilder {
-  const time = timeText(state);
-  if (!time) return embed;
-  return embed.addFields({ name: 'Time:', value: bold ? `**${time}**` : time, inline: true });
+function alignedLine(label: string, value: string, width: number): string {
+  return `${label}:`.padEnd(width + 2) + value;
 }
 
-// Embed for "this ply was just played" - used both when a move actually
-// just arrived live, and to redescribe the new current position after an
-// undo (see the gameUndo handling below), since from the thread's
-// perspective the ply now on top of `state.plies` reads the same either way.
-// "Move:" and "Time:" are separate inline fields so they sit side by side on
-// one row, with the played-move text as a third, unlabeled field below them
-// (a blank field name forces it onto its own row rather than sharing the
-// Move/Time row). That body line is bold so it reads at the same weight as
-// the field headers above it. The Move field's value carries the bare
-// "<number><W/B>" - findKnownPlyCount() depends on that exact shape to
-// recover ply counts from thread history after a cold restart.
-function moveEmbed(state: WatchState, ply: number, ptn: string): EmbedBuilder {
+function codeBlock(lines: string[]): string {
+  return `\`\`\`\n${lines.join('\n')}\n\`\`\``;
+}
+
+// "White Time"/"Black Time" lines, or none at all if remaining time isn't
+// known yet - shared by every message kind that shows the clock (move,
+// current position).
+function timeLines(state: WatchState): string[] {
+  if (state.whiteSeconds === undefined || state.blackSeconds === undefined) return [];
+  return [
+    alignedLine('White Time', formatSeconds(state.whiteSeconds), state.moveLabelWidth),
+    alignedLine('Black Time', formatSeconds(state.blackSeconds), state.moveLabelWidth),
+  ];
+}
+
+// Text for "this ply was just played" - used both when a move actually just
+// arrived live, and to redescribe the new current position after an undo
+// (see the gameUndo handling below), since from the thread's perspective the
+// ply now on top of `state.plies` reads the same either way. The "Move"
+// line's value carries the bare "<number><W/B>" - findKnownPlyCount()
+// depends on that exact shape to recover ply counts from thread history
+// after a cold restart.
+function moveText(state: WatchState, ply: number, ptn: string): string {
   const isWhite = ply % 2 === 0;
   const player = isWhite ? state.white : state.black;
   const moveNumber = Math.floor(ply / 2) + 1;
   const colorLetter = isWhite ? 'W' : 'B';
-  const embed = new EmbedBuilder().addFields({
-    name: 'Move:',
-    value: `**${moveNumber}${colorLetter}**`,
-    inline: true,
-  });
-  addTimeField(embed, state, true);
-  embed.addFields({ name: '​', value: `**${player} played: ${ptn}**`, inline: false });
-  return embed;
+  const width = state.moveLabelWidth;
+  const lines = [
+    alignedLine('Move', `${moveNumber}${colorLetter}`, width),
+    ...timeLines(state),
+    alignedLine(`${player} played`, ptn, width),
+  ];
+  return codeBlock(lines);
 }
 
-// Embed for a bare "here's the board" post with no specific move attached -
-// the very first board of a game, or the state after an undo empties the
-// ply list entirely.
-function currentPositionEmbed(state: WatchState): EmbedBuilder {
-  const embed = new EmbedBuilder().setTitle('Current position');
-  return addTimeField(embed, state);
+// Text for a bare "here's the board" post with no specific move attached -
+// the very first board of a game, or the state after an undo empties the ply
+// list entirely.
+function currentPositionText(state: WatchState): string {
+  const time = timeLines(state);
+  return codeBlock(time.length > 0 ? ['Current position', '', ...time] : ['Current position']);
+}
+
+// Thread-opening text - watchGame() and reconstructThread() both use this.
+// Uses its own tight local label width (Board/Time/Komi/Type are all short
+// and unrelated to the player-name-driven width the rest of the thread
+// uses) rather than moveLabelWidth, since this block only ever appears once
+// and stretching it to match move messages would just look sparse. `note`
+// is an optional extra line for reconstructThread()'s "not watched live"
+// disclosure.
+function watchStartText(
+  white: string,
+  black: string,
+  gameNo: number,
+  boardSize: number,
+  minutes: number,
+  incrementSeconds: number,
+  komi: string,
+  gameType: string,
+  note?: string,
+): string {
+  const width = Math.max('Board'.length, 'Time'.length, 'Komi'.length, 'Type'.length);
+  const lines = [`${white} vs ${black} (#${gameNo})`];
+  if (note) lines.push(note);
+  lines.push(
+    '',
+    alignedLine('Board', `${boardSize}x${boardSize}`, width),
+    alignedLine('Time', `${minutes}+${incrementSeconds}`, width),
+    alignedLine('Komi', komi, width),
+    alignedLine('Type', gameType, width),
+  );
+  return codeBlock(lines);
 }
 
 function clearLowTimeTimer(state: WatchState): void {
@@ -229,13 +281,13 @@ async function closeThread(thread: ThreadChannel): Promise<void> {
   await thread.setLocked(true).catch(() => {});
 }
 
-// Board image as the embed's image, so it renders inside the same visual
-// block as the move/time text rather than as a separate bare attachment.
-async function postBoard(state: WatchState, embed: EmbedBuilder): Promise<void> {
+// Text and board image in the same message, so the board always lands right
+// under the text describing it rather than as a separate, possibly
+// out-of-order post.
+async function postBoard(state: WatchState, content: string): Promise<void> {
   const png = renderBoardPng(state.boardSize, state.komi, state.plies, state.white, state.black);
   const attachment = new AttachmentBuilder(png, { name: 'board.png' });
-  embed.setImage('attachment://board.png');
-  await state.thread.send({ embeds: [embed], files: [attachment] });
+  await state.thread.send({ content, files: [attachment] });
 }
 
 function armSettleTimer(state: WatchState): void {
@@ -244,30 +296,20 @@ function armSettleTimer(state: WatchState): void {
     state.live = true;
     try {
       if (state.historyMode === 'newThread' && state.plies.length > 0) {
-        await state.thread.send({
-          embeds: [
-            new EmbedBuilder()
-              .setTitle('Moves so far')
-              .setDescription(`\`\`\`\n${formatPtnMoveList(state.plies)}\n\`\`\``),
-          ],
-        });
-        await postBoard(state, currentPositionEmbed(state));
+        await state.thread.send(codeBlock(['Moves so far', '', formatPtnMoveList(state.plies)]));
+        await postBoard(state, currentPositionText(state));
       } else if (state.historyMode === 'reconnect') {
         const missed = state.plies.slice(state.catchupFromPly ?? 0);
         // Nothing actually happened while disconnected - no catch-up
         // needed, so stay quiet rather than post a redundant board.
         if (missed.length > 0) {
-          await state.thread.send({
-            embeds: [
-              new EmbedBuilder()
-                .setTitle('Moves missed while disconnected')
-                .setDescription(`\`\`\`\n${formatPtnMoveList(missed, state.catchupFromPly ?? 0)}\n\`\`\``),
-            ],
-          });
-          await postBoard(state, currentPositionEmbed(state));
+          await state.thread.send(
+            codeBlock(['Moves missed while disconnected', '', formatPtnMoveList(missed, state.catchupFromPly ?? 0)]),
+          );
+          await postBoard(state, currentPositionText(state));
         }
       } else {
-        await postBoard(state, currentPositionEmbed(state));
+        await postBoard(state, currentPositionText(state));
       }
     } catch (err) {
       console.error(`Failed to post caught-up position for game #${state.gameNo}:`, err);
@@ -305,14 +347,10 @@ async function handleGameEnd(
     plies: state.plies,
   });
   await resolveLowTimeWarning(state);
+  // The link stays outside the code block - masked links don't render as
+  // clickable inside a fenced block, only as literal text.
   await state.thread
-    .send({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle('Game Over')
-          .setDescription(`**${resultText}**\n\n**[View full game on ptn.ninja](${ptnLink})**`),
-      ],
-    })
+    .send(`${codeBlock(['Game Over', '', resultText])}\n[View full game on ptn.ninja](${ptnLink})`)
     .catch(() => {});
   await scheduleClose(state.thread);
 
@@ -371,16 +409,12 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
 
       try {
         await resolveLowTimeWarning(state);
-        await state.thread.send({
-          embeds: [
-            new EmbedBuilder().setTitle('Move taken back').setDescription(`${undoingPlayer} took back their move.`),
-          ],
-        });
+        await state.thread.send(codeBlock(['Move taken back', '', `${undoingPlayer} took back their move.`]));
         if (state.plies.length === 0) {
-          await postBoard(state, currentPositionEmbed(state));
+          await postBoard(state, currentPositionText(state));
         } else {
           const ply = state.plies.length - 1;
-          await postBoard(state, moveEmbed(state, ply, state.plies[ply]));
+          await postBoard(state, moveText(state, ply, state.plies[ply]));
         }
       } catch (err) {
         console.error(`Failed to post undo for game #${event.gameNo}:`, err);
@@ -401,7 +435,7 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
     state.plies.push(ptn);
     try {
       await resolveLowTimeWarning(state);
-      await postBoard(state, moveEmbed(state, ply, ptn));
+      await postBoard(state, moveText(state, ply, ptn));
     } catch (err) {
       console.error(`Failed to post move to thread for game #${event.gameNo}:`, err);
     }
@@ -492,19 +526,7 @@ export async function watchGame(
   const minutes = Math.floor(game.timeSeconds / 60);
   const gameType = formatGameType(game.unrated, game.tournament);
   const komi = formatKomi(game.komi);
-  await thread.send({
-    embeds: [
-      new EmbedBuilder()
-        .setTitle(`${game.white} vs ${game.black}`)
-        .setDescription(`${game.white} (white) vs ${game.black} (black)`)
-        .addFields(
-          { name: 'Board', value: `${game.boardSize}x${game.boardSize}`, inline: true },
-          { name: 'Time', value: `${minutes}+${game.incrementSeconds}`, inline: true },
-          { name: 'Komi', value: komi, inline: true },
-          { name: 'Type', value: gameType, inline: true },
-        ),
-    ],
-  });
+  await thread.send(watchStartText(game.white, game.black, game.gameNo, game.boardSize, minutes, game.incrementSeconds, komi, gameType));
 
   const state: WatchState = {
     gameNo: game.gameNo,
@@ -517,6 +539,7 @@ export async function watchGame(
     plies: [],
     live: false,
     historyMode: 'newThread',
+    moveLabelWidth: computeMoveLabelWidth(game.white, game.black),
   };
   beginObserving(playtak, state);
 
@@ -539,7 +562,7 @@ export async function reconstructThread(parentChannel: TextChannel, gameNo: numb
   });
   watchedThreads.set(gameNo, thread);
 
-  // A lightweight WatchState - just enough for currentPositionEmbed()/
+  // A lightweight WatchState - just enough for currentPositionText()/
   // postBoard() to render the final position. No live tracking fields are
   // meaningful here (`live`/`historyMode` are unused off this path).
   const state: WatchState = {
@@ -552,38 +575,30 @@ export async function reconstructThread(parentChannel: TextChannel, gameNo: numb
     plies: archived.plies,
     live: true,
     historyMode: 'newThread',
+    moveLabelWidth: computeMoveLabelWidth(archived.white, archived.black),
   };
 
   const minutes = Math.floor(archived.timeSeconds / 60);
   const gameType = formatGameType(archived.unrated, archived.tournament);
   const komiText = formatKomi(archived.komi);
-  await thread.send({
-    embeds: [
-      new EmbedBuilder()
-        .setTitle(`${archived.white} vs ${archived.black}`)
-        .setDescription(
-          `Reconstructed from PlayTak's archive - nobody was watching this game live.\n` +
-            `${archived.white} (white) vs ${archived.black} (black)`,
-        )
-        .addFields(
-          { name: 'Board', value: `${archived.boardSize}x${archived.boardSize}`, inline: true },
-          { name: 'Time', value: `${minutes}+${archived.incrementSeconds}`, inline: true },
-          { name: 'Komi', value: komiText, inline: true },
-          { name: 'Type', value: gameType, inline: true },
-        ),
-    ],
-  });
+  await thread.send(
+    watchStartText(
+      archived.white,
+      archived.black,
+      gameNo,
+      archived.boardSize,
+      minutes,
+      archived.incrementSeconds,
+      komiText,
+      gameType,
+      "Reconstructed from PlayTak's archive - nobody was watching this game live.",
+    ),
+  );
 
   if (archived.plies.length > 0) {
-    await thread.send({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle('Moves so far')
-          .setDescription(`\`\`\`\n${formatPtnMoveList(archived.plies)}\n\`\`\``),
-      ],
-    });
+    await thread.send(codeBlock(['Moves so far', '', formatPtnMoveList(archived.plies)]));
   }
-  await postBoard(state, currentPositionEmbed(state));
+  await postBoard(state, currentPositionText(state));
 
   const ptnLink = await buildPtnNinjaLink({
     white: archived.white,
@@ -593,16 +608,10 @@ export async function reconstructThread(parentChannel: TextChannel, gameNo: numb
     result: archived.result,
     plies: archived.plies,
   });
-  await thread.send({
-    embeds: [
-      new EmbedBuilder()
-        .setTitle('Game Over')
-        .setDescription(
-          `**${describeResult(archived.result, archived.white, archived.black)}**\n\n` +
-            `**[View full game on ptn.ninja](${ptnLink})**`,
-        ),
-    ],
-  });
+  await thread.send(
+    `${codeBlock(['Game Over', '', describeResult(archived.result, archived.white, archived.black)])}\n` +
+      `[View full game on ptn.ninja](${ptnLink})`,
+  );
 
   return thread;
 }
@@ -613,10 +622,11 @@ async function hasAlreadyWarnedClose(thread: ThreadChannel): Promise<boolean> {
   return recent.some((message) => message.content.includes(CLOSE_WARNING_TEXT));
 }
 
-// Matches the "<number><W/B>" value of every move/undo post's "Move" field
-// (see moveEmbed()) - the only place a ply number appears in the thread's
-// own history.
-const MOVE_LINE_PATTERN = /^(\d+)([WB])$/;
+// Matches the "Move: <number><W/B>" line every move/undo post carries (see
+// moveText()) - the only place a ply number appears in the thread's own
+// history. `\s+` rather than a fixed count of spaces since the padding width
+// varies by thread (see WatchState.moveLabelWidth).
+const MOVE_LINE_PATTERN = /^Move:\s+(\d+)([WB])\s*$/m;
 
 function plyFromMoveLine(moveNumber: number, colorLetter: string): number {
   return (moveNumber - 1) * 2 + (colorLetter === 'W' ? 0 : 1);
@@ -637,17 +647,10 @@ async function findKnownPlyCount(thread: ThreadChannel): Promise<number | undefi
 
   let highestPly: number | undefined;
   for (const message of recent.values()) {
-    // 'Move' without the colon is the older field name - still matched so a
-    // thread posted to before that rename can still be resumed.
-    const texts = message.embeds.flatMap((embed) =>
-      embed.fields.filter((field) => field.name === 'Move:' || field.name === 'Move').map((field) => field.value),
-    );
-    for (const text of texts) {
-      const match = MOVE_LINE_PATTERN.exec(text);
-      if (!match) continue;
-      const ply = plyFromMoveLine(Number(match[1]), match[2]);
-      if (highestPly === undefined || ply > highestPly) highestPly = ply;
-    }
+    const match = MOVE_LINE_PATTERN.exec(message.content);
+    if (!match) continue;
+    const ply = plyFromMoveLine(Number(match[1]), match[2]);
+    if (highestPly === undefined || ply > highestPly) highestPly = ply;
   }
   return highestPly === undefined ? undefined : highestPly + 1;
 }
@@ -709,6 +712,7 @@ export async function sweepThreads(discordClient: Client, playtak: PlaytakClient
             live: false,
             historyMode: knownPlyCount === undefined ? 'resume' : 'reconnect',
             catchupFromPly: knownPlyCount,
+            moveLabelWidth: computeMoveLabelWidth(game.white, game.black),
           });
         }
         continue;
