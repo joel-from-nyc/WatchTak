@@ -78,6 +78,12 @@ interface WatchState {
   // Pending timer that will post the warning when the player on the clock
   // crosses the threshold mid-think - see scheduleLowTimeWarning().
   lowTimeTimer?: NodeJS.Timeout;
+  // Bumped by resolveLowTimeWarning() every time something (a move, an undo,
+  // the game ending) invalidates whatever low-time attempt is currently in
+  // flight - lets postLowTimeWarning() detect that it went stale while its
+  // `.send()` was still pending. See postLowTimeWarning() for why this is
+  // needed. Undefined is treated as 0.
+  lowTimeGeneration?: number;
 }
 
 // One bot instance only ever lives in one Discord server, so a game is only
@@ -229,18 +235,36 @@ function scheduleLowTimeWarning(state: WatchState): void {
 
   const flagAtMs = Date.now() + seconds * 1000;
   const delayMs = Math.max(0, (seconds - LOW_TIME_THRESHOLD_SECONDS) * 1000);
+  const generation = state.lowTimeGeneration ?? 0;
   state.lowTimeTimer = setTimeout(() => {
     state.lowTimeTimer = undefined;
-    postLowTimeWarning(state, isWhite, flagAtMs).catch((err) => {
+    postLowTimeWarning(state, isWhite, flagAtMs, generation).catch((err) => {
       console.error(`Failed to post low-time warning for game #${state.gameNo}:`, err);
     });
   }, delayMs);
 }
 
+function staleWarningText(state: WatchState, color: 'white' | 'black'): string {
+  const player = color === 'white' ? state.white : state.black;
+  const seconds = color === 'white' ? state.whiteSeconds : state.blackSeconds;
+  return seconds === undefined
+    ? `${player} was running low on time.`
+    : `${player} was running low on time (${formatSeconds(seconds)} left).`;
+}
+
 // `<t:UNIX:R>` renders as a live relative countdown that ticks in the client
 // with no further edits from us, so the post stays accurate on its own until
-// something resolves it.
-async function postLowTimeWarning(state: WatchState, isWhite: boolean, flagAtMs: number): Promise<void> {
+// something resolves it. `generation` is a snapshot of state.lowTimeGeneration
+// taken when this attempt was scheduled - if a move, undo, or game end
+// resolves the warning (bumping the generation) while the `.send()` below is
+// still in flight, resolveLowTimeWarning() finds nothing yet to edit (this
+// message doesn't exist yet) and no-ops. Without checking the generation
+// here too, this function would then go on to store the message as "the"
+// live warning once it finally lands - one nothing will ever resolve again,
+// since the event that should have resolved it already happened. Comparing
+// generations after the send catches that gap and edits the message to its
+// final text immediately instead.
+async function postLowTimeWarning(state: WatchState, isWhite: boolean, flagAtMs: number, generation: number): Promise<void> {
   if (state.lowTimeWarning) return;
 
   const player = isWhite ? state.white : state.black;
@@ -252,26 +276,28 @@ async function postLowTimeWarning(state: WatchState, isWhite: boolean, flagAtMs:
     });
   if (!message) return;
 
+  if ((state.lowTimeGeneration ?? 0) !== generation) {
+    await message.edit(staleWarningText(state, isWhite ? 'white' : 'black')).catch(() => {});
+    return;
+  }
+
   state.lowTimeWarning = { message, color: isWhite ? 'white' : 'black' };
 }
 
 // Replaces a live countdown with a static, no-longer-ticking readout the
 // moment it goes stale - a move landing, an undo, or the game ending. Only
 // one warning can exist at a time, so this always resolves whichever one is
-// pending regardless of what caused it, and is a no-op if none is pending.
+// pending regardless of what caused it, and is a no-op if none is pending
+// (but still bumps the generation counter - see postLowTimeWarning() - since
+// a warning can be "pending" in the sense of being in flight without having
+// reached state.lowTimeWarning yet).
 async function resolveLowTimeWarning(state: WatchState): Promise<void> {
+  state.lowTimeGeneration = (state.lowTimeGeneration ?? 0) + 1;
   clearLowTimeTimer(state);
   const warning = state.lowTimeWarning;
   if (!warning) return;
   state.lowTimeWarning = undefined;
-
-  const player = warning.color === 'white' ? state.white : state.black;
-  const seconds = warning.color === 'white' ? state.whiteSeconds : state.blackSeconds;
-  const text =
-    seconds === undefined
-      ? `${player} was running low on time.`
-      : `${player} was running low on time (${formatSeconds(seconds)} left).`;
-  await warning.message.edit(text).catch(() => {});
+  await warning.message.edit(staleWarningText(state, warning.color)).catch(() => {});
 }
 
 async function closeThread(thread: ThreadChannel): Promise<void> {
