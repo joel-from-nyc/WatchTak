@@ -245,7 +245,7 @@ async function postLowTimeWarning(state: WatchState, isWhite: boolean, flagAtMs:
 
   const player = isWhite ? state.white : state.black;
   const message = await state.thread
-    .send(`${player} is running low on time! Flags <t:${Math.floor(flagAtMs / 1000)}:R>`)
+    .send(`${player} will lose on time in: <t:${Math.floor(flagAtMs / 1000)}:R>`)
     .catch((err) => {
       console.error(`Failed to post low-time warning for game #${state.gameNo}:`, err);
       return null;
