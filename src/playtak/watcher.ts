@@ -26,7 +26,7 @@ const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 // sweep. sweepThreads() checks a thread's recent messages for this exact
 // text to avoid re-posting it (and re-arming a fresh 24h timer) on every
 // pass - see sweepThreads().
-const CLOSE_WARNING_TEXT = 'This thread will be archived in 24 hours.';
+const CLOSE_WARNING_PREFIX = 'This thread will be archived';
 
 // Embedded in every thread's name so a restarted bot (with no memory of its
 // own) can recover which PlayTak game a thread belongs to just by reading
@@ -45,12 +45,6 @@ interface WatchState {
   komi: number;
   plies: string[];
   live: boolean;
-  // Column width every "Label: value" line in this thread pads its label to
-  // (see alignedLine()) - computed once from both player names so the
-  // colon column stays in the same place across every message in the
-  // thread, rather than shifting depending on whose (differently-sized)
-  // name is on a given line. See computeMoveLabelWidth().
-  moveLabelWidth: number;
   // Most recently known remaining time, from Game#<no> Time events.
   // Undefined until the first one arrives.
   whiteSeconds?: number;
@@ -113,20 +107,10 @@ function formatSeconds(totalSeconds: number): string {
 }
 
 // Every "Label: value" line in a thread pads its label to the same width, so
-// the colon column lines up down the whole message history rather than
-// shifting message-to-message with whoever's name is on a given line (see
-// WatchState.moveLabelWidth). Computed once, from the labels that actually
-// appear across a game's messages: "Move", "White Time", "Black Time", and
-// "<player> played" for both sides - whichever is longest sets the width.
-function computeMoveLabelWidth(white: string, black: string): number {
-  return Math.max(
-    'Move'.length,
-    'White Time'.length,
-    'Black Time'.length,
-    `${white} played`.length,
-    `${black} played`.length,
-  );
-}
+// the colon column lines up down the whole message history. The labels
+// themselves ("Move", "White Time", "Black Time") are fixed, so this is a
+// constant rather than something computed per game.
+const MOVE_LABEL_WIDTH = Math.max('Move'.length, 'White Time'.length, 'Black Time'.length);
 
 function alignedLine(label: string, value: string, width: number): string {
   return `${label}:`.padEnd(width + 2) + value;
@@ -142,8 +126,8 @@ function codeBlock(lines: string[]): string {
 function timeLines(state: WatchState): string[] {
   if (state.whiteSeconds === undefined || state.blackSeconds === undefined) return [];
   return [
-    alignedLine('White Time', formatSeconds(state.whiteSeconds), state.moveLabelWidth),
-    alignedLine('Black Time', formatSeconds(state.blackSeconds), state.moveLabelWidth),
+    alignedLine('White Time', formatSeconds(state.whiteSeconds), MOVE_LABEL_WIDTH),
+    alignedLine('Black Time', formatSeconds(state.blackSeconds), MOVE_LABEL_WIDTH),
   ];
 }
 
@@ -151,19 +135,16 @@ function timeLines(state: WatchState): string[] {
 // arrived live, and to redescribe the new current position after an undo
 // (see the gameUndo handling below), since from the thread's perspective the
 // ply now on top of `state.plies` reads the same either way. The "Move"
-// line's value carries the bare "<number><W/B>" - findKnownPlyCount()
-// depends on that exact shape to recover ply counts from thread history
-// after a cold restart.
+// line's value starts with the bare "<number><W/B>" - findKnownPlyCount()/
+// MOVE_LINE_PATTERN depend on that prefix to recover ply counts from thread
+// history after a cold restart.
 function moveText(state: WatchState, ply: number, ptn: string): string {
   const isWhite = ply % 2 === 0;
-  const player = isWhite ? state.white : state.black;
   const moveNumber = Math.floor(ply / 2) + 1;
   const colorLetter = isWhite ? 'W' : 'B';
-  const width = state.moveLabelWidth;
   const lines = [
-    alignedLine('Move', `${moveNumber}${colorLetter}`, width),
+    alignedLine('Move', `${moveNumber}${colorLetter}. ${ptn}`, MOVE_LABEL_WIDTH),
     ...timeLines(state),
-    alignedLine(`${player} played`, ptn, width),
   ];
   return codeBlock(lines);
 }
@@ -177,11 +158,10 @@ function currentPositionText(state: WatchState): string {
 }
 
 // Thread-opening text - watchGame() and reconstructThread() both use this.
-// Uses its own tight local label width (Board/Time/Komi/Type are all short
-// and unrelated to the player-name-driven width the rest of the thread
-// uses) rather than moveLabelWidth, since this block only ever appears once
-// and stretching it to match move messages would just look sparse. `note`
-// is an optional extra line for reconstructThread()'s "not watched live"
+// Uses its own tight local label width (Board/Time/Komi/Type are all short)
+// rather than MOVE_LABEL_WIDTH, since this block only ever appears once and
+// stretching it to match move messages would just look sparse. `note` is an
+// optional extra line for reconstructThread()'s "not watched live"
 // disclosure.
 function watchStartText(
   white: string,
@@ -228,6 +208,10 @@ function clearLowTimeTimer(state: WatchState): void {
 function scheduleLowTimeWarning(state: WatchState): void {
   clearLowTimeTimer(state);
   if (!state.live) return;
+  // PlayTak doesn't start either player's clock until both have made their
+  // (forced, untimed) opening move, so a countdown armed before that would
+  // be counting down from a clock that isn't actually running yet.
+  if (state.plies.length < 2) return;
 
   const isWhite = state.plies.length % 2 === 0;
   const seconds = isWhite ? state.whiteSeconds : state.blackSeconds;
@@ -269,7 +253,7 @@ async function postLowTimeWarning(state: WatchState, isWhite: boolean, flagAtMs:
 
   const player = isWhite ? state.white : state.black;
   const message = await state.thread
-    .send(`${player} will lose on time in: <t:${Math.floor(flagAtMs / 1000)}:R>`)
+    .send(`${player} will lose on time <t:${Math.floor(flagAtMs / 1000)}:R>`)
     .catch((err) => {
       console.error(`Failed to post low-time warning for game #${state.gameNo}:`, err);
       return null;
@@ -354,7 +338,10 @@ function beginObserving(playtak: PlaytakClient, state: WatchState): void {
 }
 
 async function scheduleClose(thread: ThreadChannel): Promise<void> {
-  await thread.send(CLOSE_WARNING_TEXT).catch(() => {});
+  const closeAtMs = Date.now() + THREAD_CLOSE_DELAY_MS;
+  await thread
+    .send(`${CLOSE_WARNING_PREFIX} <t:${Math.floor(closeAtMs / 1000)}:R>.`)
+    .catch(() => {});
   setTimeout(() => closeThread(thread), THREAD_CLOSE_DELAY_MS);
 }
 
@@ -586,7 +573,6 @@ export async function watchGame(
     plies: [],
     live: false,
     historyMode: 'newThread',
-    moveLabelWidth: computeMoveLabelWidth(game.white, game.black),
   };
   beginObserving(playtak, state);
 
@@ -622,7 +608,6 @@ export async function reconstructThread(parentChannel: TextChannel, gameNo: numb
     plies: archived.plies,
     live: true,
     historyMode: 'newThread',
-    moveLabelWidth: computeMoveLabelWidth(archived.white, archived.black),
   };
 
   const minutes = Math.floor(archived.timeSeconds / 60);
@@ -666,14 +651,14 @@ export async function reconstructThread(parentChannel: TextChannel, gameNo: numb
 async function hasAlreadyWarnedClose(thread: ThreadChannel): Promise<boolean> {
   const recent = await thread.messages.fetch({ limit: 10 }).catch(() => null);
   if (!recent) return false;
-  return recent.some((message) => message.content.includes(CLOSE_WARNING_TEXT));
+  return recent.some((message) => message.content.includes(CLOSE_WARNING_PREFIX));
 }
 
-// Matches the "Move: <number><W/B>" line every move/undo post carries (see
-// moveText()) - the only place a ply number appears in the thread's own
-// history. `\s+` rather than a fixed count of spaces since the padding width
-// varies by thread (see WatchState.moveLabelWidth).
-const MOVE_LINE_PATTERN = /^Move:\s+(\d+)([WB])\s*$/m;
+// Matches the "Move: <number><W/B>. <ptn>" line every move/undo post carries
+// (see moveText()) - the only place a ply number appears in the thread's own
+// history. `\s+` rather than a fixed count of spaces since MOVE_LABEL_WIDTH
+// could change; the rest of the line (the "." and ptn) is ignored.
+const MOVE_LINE_PATTERN = /^Move:\s+(\d+)([WB])\b/m;
 
 function plyFromMoveLine(moveNumber: number, colorLetter: string): number {
   return (moveNumber - 1) * 2 + (colorLetter === 'W' ? 0 : 1);
@@ -759,7 +744,6 @@ export async function sweepThreads(discordClient: Client, playtak: PlaytakClient
             live: false,
             historyMode: knownPlyCount === undefined ? 'resume' : 'reconnect',
             catchupFromPly: knownPlyCount,
-            moveLabelWidth: computeMoveLabelWidth(game.white, game.black),
           });
         }
         continue;
