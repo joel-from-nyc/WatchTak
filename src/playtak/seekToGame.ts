@@ -44,8 +44,13 @@ const pendingRemovals: PendingRemoval[] = [];
 const pendingGames: PendingGame[] = [];
 
 // Which announcement message(s) ended up advertising each live game, so the
-// button can be swapped for a review link once that game finishes.
-const noticesByGame = new Map<number, SeekMessageRef[]>();
+// button can be swapped for a review link once that game finishes. Carries
+// the player names too, so retireGameNotice() can render the "finished" text
+// directly instead of reading the live message back - discord.js's
+// `MessageManager#edit()` returns a patched clone but doesn't write it into
+// the channel's message cache, so a later `messages.fetch()` can hand back
+// the pre-edit content and silently overwrite the notice with stale text.
+const noticesByGame = new Map<number, { refs: SeekMessageRef[]; white: string; black: string }>();
 
 let replayingUntil = 0;
 
@@ -92,7 +97,7 @@ async function convertToGameNotice(
     if (edited) landed.push(ref);
   }
 
-  if (landed.length > 0) noticesByGame.set(game.gameNo, landed);
+  if (landed.length > 0) noticesByGame.set(game.gameNo, { refs: landed, white: game.white, black: game.black });
 }
 
 // Used when there's no existing seek announcement to convert - a game that
@@ -115,7 +120,7 @@ async function postFreshGameNotice(discordClient: Client, game: GameListEntry): 
     if (message) landed.push({ channelId, messageId: message.id });
   }
 
-  if (landed.length > 0) noticesByGame.set(game.gameNo, landed);
+  if (landed.length > 0) noticesByGame.set(game.gameNo, { refs: landed, white: game.white, black: game.black });
 }
 
 // Quiet mode suppresses game-started notices, but seek announcements
@@ -144,8 +149,8 @@ async function announceGame(discordClient: Client, game: GameListEntry, refs: Se
 // system message, posted here when the thread was created, is deleted too,
 // since the notice itself (now pointing at the thread via Review) is enough.
 async function retireGameNotice(discordClient: Client, gameNo: number): Promise<void> {
-  const refs = noticesByGame.get(gameNo);
-  if (!refs) return;
+  const notice = noticesByGame.get(gameNo);
+  if (!notice) return;
   noticesByGame.delete(gameNo);
 
   const thread = getWatchedThread(gameNo);
@@ -154,12 +159,10 @@ async function retireGameNotice(discordClient: Client, gameNo: number): Promise<
     await starter?.delete().catch(() => {});
   }
 
-  for (const ref of refs) {
+  const content = `**${notice.white}** vs **${notice.black}** (#${gameNo}) has finished.`;
+  for (const ref of notice.refs) {
     const channel = await fetchTextChannel(discordClient, ref.channelId);
     if (!channel) continue;
-    const message = await channel.messages.fetch(ref.messageId).catch(() => null);
-    if (!message) continue;
-    const content = message.content.replace(/ has started!$/, ' has finished.');
     await channel.messages.edit(ref.messageId, { content, components: [reviewRow(gameNo)] }).catch(() => {});
   }
 }
