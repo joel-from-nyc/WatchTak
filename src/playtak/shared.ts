@@ -15,6 +15,8 @@ export function initPlaytak(): { client: PlaytakClient; gameRegistry: GameRegist
     gameRegistry = new GameRegistry(client);
     seekRegistry = new SeekRegistry(client);
     client.on('error', (err) => console.error('PlayTak connection error:', err));
+    client.on('connected', () => console.log('Connected to PlayTak.'));
+    client.on('disconnected', () => console.log('Disconnected from PlayTak, reconnecting...'));
     client.connect();
   }
   return { client, gameRegistry: gameRegistry!, seekRegistry: seekRegistry! };

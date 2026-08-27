@@ -1,8 +1,15 @@
 import { Client, TextChannel } from 'discord.js';
 import { PlaytakClient } from './client';
-import { Seek } from './protocol';
+import { GameListEntry, Seek } from './protocol';
 import { getSeekRegistry } from './shared';
-import { loadAnnounceState, setChannelAnnouncing, clearChannelAnnouncing, setChannelQuiet } from './announceStore';
+import {
+  AnnounceMode,
+  loadAnnounceState,
+  setChannelAnnouncing,
+  clearChannelAnnouncing,
+  setChannelMode,
+  resolveMode,
+} from './announceStore';
 import { formatGameType, formatKomi, formatSeekColor } from './format';
 import { notifySeekRemoved, SeekMessageRef } from './seekToGame';
 
@@ -25,18 +32,83 @@ const ANNOUNCEMENT_MARKER = 'has created a new game:';
 const PENDING = 'pending';
 const PENDING_REMOVED = 'pending-removed';
 
+// Discord's error code for a channel the bot can no longer see/post in -
+// e.g. its permission was revoked, or it was removed from the channel.
+const MISSING_ACCESS_CODE = 50001;
+
+// How many posting attempts to a channel can fail in a row with Missing
+// Access before /announce is auto-disabled there - see notePostOutcome().
+const MAX_CONSECUTIVE_MISSING_ACCESS = 3;
+
+// PlayTak guest accounts are always named "Guest" plus a numeric id (e.g.
+// "Guest672") - confirmed against live traffic. Anchored and case-sensitive
+// so a registered account named e.g. "guestbook" doesn't false-positive.
+const GUEST_NAME_PATTERN = /^Guest\d+$/;
+
 // A channel currently opted in via /announce: `tracked` maps the seeks it's
 // showing to the message announcing them - this is what makes the channel a
 // live view rather than a feed, since the message is deleted when its seek
-// goes away, so what's on screen is what's actually joinable. `quiet` gates
+// goes away, so what's on screen is what's actually joinable. `mode` gates
 // only the seek-to-game "started!" notices (see seekToGame.ts) - seek
 // announcements themselves are unaffected by it.
 interface ChannelAnnounceState {
   tracked: Map<number, string>;
-  quiet: boolean;
+  mode: AnnounceMode;
 }
 
 const announcements = new Map<string, ChannelAnnounceState>();
+
+// Consecutive Missing Access failures per channel - see notePostOutcome().
+const missingAccessStreak = new Map<string, number>();
+
+// Every player's bot status, as last reported by the protocol-v2 flag on a
+// `Seek new` line for them - built up over the process's lifetime from
+// every seek anyone posts, not just the announceable ones. This is the only
+// way to learn whether the player on the *other* side of a game (the one
+// who accepted a seek rather than posted it) is a bot: PlayTak's wire
+// protocol never says who accepted a seek, only that it disappeared around
+// the same time a game appeared (see seekToGame.ts's correlation), so a bot
+// that only ever accepts seeks and never posts its own would otherwise be
+// indistinguishable from a human. Bot status doesn't change, so a stale
+// entry from an earlier seek is still correct; no eviction needed for a map
+// this small (one entry per player name ever seen).
+const knownBotByName = new Map<string, boolean>();
+
+function isGuestName(name: string): boolean {
+  return GUEST_NAME_PATTERN.test(name);
+}
+
+// True when `name` is known to be a bot - either it's the player who
+// created `seek` and the server flagged them as one, or they've posted some
+// other seek during this process's lifetime that did (see
+// `knownBotByName`). A player never observed to be flagged either way is
+// assumed not to be a bot, so `users` mode errs toward showing a game
+// rather than hiding one on a guess.
+function isConfirmedBot(name: string, seek: Seek | undefined): boolean {
+  if (seek && seek.player === name && seek.isBot !== undefined) return seek.isBot;
+  return knownBotByName.get(name) === true;
+}
+
+function isLoggedInUser(name: string, seek: Seek | undefined): boolean {
+  return !isGuestName(name) && !isConfirmedBot(name, seek);
+}
+
+// Whether a channel in `mode` should get a game-started notice for `game`.
+// `seek` is the seek that was matched to this game, when there was one (see
+// seekToGame.ts) - it's the only source of bot-status the protocol offers,
+// and only for whichever side created the seek.
+function modeAllowsGame(mode: AnnounceMode, game: GameListEntry, seek: Seek | undefined): boolean {
+  switch (mode) {
+    case 'on':
+      return true;
+    case 'quiet':
+      return false;
+    case 'noguest':
+      return !isGuestName(game.white) && !isGuestName(game.black);
+    case 'users':
+      return isLoggedInUser(game.white, seek) || isLoggedInUser(game.black, seek);
+  }
+}
 
 function describeSeek(seek: Seek): string {
   const minutes = Math.floor(seek.timeSeconds / 60);
@@ -65,32 +137,71 @@ export function isAnnouncing(channelId: string): boolean {
   return announcements.has(channelId);
 }
 
-export function isAnnounceQuiet(channelId: string): boolean {
-  return announcements.get(channelId)?.quiet ?? false;
+export function getAnnounceMode(channelId: string): AnnounceMode {
+  return announcements.get(channelId)?.mode ?? 'on';
 }
 
-// Flips quiet mode on a channel that's already announcing, without
-// resetting its tracked seek list - see announce.ts's `quiet`/`on` handling.
-// No-op if the channel isn't currently announcing.
-export function setAnnounceQuiet(channelId: string, quiet: boolean): void {
+// Flips the mode on a channel that's already announcing, without resetting
+// its tracked seek list - see announce.ts's mode-switching. No-op if the
+// channel isn't currently announcing.
+export function setAnnounceMode(channelId: string, mode: AnnounceMode): void {
   const state = announcements.get(channelId);
   if (!state) return;
-  state.quiet = quiet;
-  setChannelQuiet(channelId, quiet);
+  state.mode = mode;
+  setChannelMode(channelId, mode);
 }
 
-// Channels eligible for a seek-to-game "started!" notice right now - used by
-// seekToGame.ts's postFreshGameNotice() when there's no existing seek
-// announcement to convert (a private/rematch-derived game).
-export function listAnnouncingChannelIds(options: { excludeQuiet: boolean } = { excludeQuiet: false }): string[] {
+// Whether a channel should get a game-started notice for `game` right now -
+// used by seekToGame.ts when it has an existing seek announcement it could
+// convert into one.
+export function isGameNoticeAllowed(channelId: string, game: GameListEntry, seek: Seek | undefined): boolean {
+  return modeAllowsGame(getAnnounceMode(channelId), game, seek);
+}
+
+// Channels eligible for a fresh "started!" notice for `game` right now -
+// used by seekToGame.ts's postFreshGameNotice() when there's no existing
+// seek announcement to convert (a private/rematch-derived game).
+export function listAnnouncingChannelIds(game: GameListEntry, seek: Seek | undefined): string[] {
   return [...announcements.entries()]
-    .filter(([, state]) => !options.excludeQuiet || !state.quiet)
+    .filter(([, state]) => modeAllowsGame(state.mode, game, seek))
     .map(([channelId]) => channelId);
 }
 
 export async function fetchTextChannel(discordClient: Client, channelId: string): Promise<TextChannel | null> {
   const channel = await discordClient.channels.fetch(channelId).catch(() => null);
   return channel instanceof TextChannel ? channel : null;
+}
+
+function isMissingAccessError(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === MISSING_ACCESS_CODE;
+}
+
+// Called after every attempt to post or edit a message in an announcing
+// channel (`err` is the caught error, or null on success), so a channel
+// that's permanently lost the ability to post there - kicked out, or its
+// permissions revoked - gets /announce turned off automatically instead of
+// failing, and re-logging the same error, on every single seek and game
+// event forever. Only counts consecutive Missing Access failures: anything
+// else (a rate limit, a network blip, or a success) resets the streak,
+// since those aren't evidence of a permanent problem.
+export function notePostOutcome(discordClient: Client, channelId: string, err: unknown): void {
+  if (err !== null && isMissingAccessError(err)) {
+    const streak = (missingAccessStreak.get(channelId) ?? 0) + 1;
+    if (streak < MAX_CONSECUTIVE_MISSING_ACCESS) {
+      missingAccessStreak.set(channelId, streak);
+      return;
+    }
+    missingAccessStreak.delete(channelId);
+    console.error(
+      `Turning off /announce in ${channelId}: ${streak} consecutive "Missing Access" errors posting there - ` +
+        'the bot has likely lost permission to send messages in this channel.',
+    );
+    turnOffAnnounce(discordClient, channelId).catch((offErr) => {
+      console.error(`Failed to auto-disable /announce in ${channelId}:`, offErr);
+    });
+    return;
+  }
+  missingAccessStreak.delete(channelId);
 }
 
 // Reserves the seek's slot with PENDING before the `send` even starts, so a
@@ -103,8 +214,10 @@ async function postSeek(channel: TextChannel, tracked: Map<number, string>, seek
   tracked.set(seek.id, PENDING);
   const message = await channel.send(describeSeek(seek)).catch((err) => {
     console.error(`Failed to post seek announcement to ${channel.id}:`, err);
+    notePostOutcome(channel.client, channel.id, err);
     return null;
   });
+  if (message) notePostOutcome(channel.client, channel.id, null);
 
   const removedWhilePending = tracked.get(seek.id) === PENDING_REMOVED;
   if (!message) {
@@ -168,9 +281,9 @@ async function clearStaleAnnouncements(channel: TextChannel, botId: string): Pro
 // Wipes any stale announcements in the channel, then posts every human seek
 // that's currently open. Shared by toggling on and by resuming after a
 // restart - both start a channel from the same "accurate right now" state.
-async function activateChannel(discordClient: Client, channel: TextChannel, quiet: boolean): Promise<Map<number, string>> {
+async function activateChannel(discordClient: Client, channel: TextChannel, mode: AnnounceMode): Promise<Map<number, string>> {
   const tracked = new Map<number, string>();
-  announcements.set(channel.id, { tracked, quiet });
+  announcements.set(channel.id, { tracked, mode });
 
   const botId = discordClient.user?.id;
   if (botId) await clearStaleAnnouncements(channel, botId);
@@ -182,19 +295,19 @@ async function activateChannel(discordClient: Client, channel: TextChannel, quie
 
 // Shows every human seek that's open right now, so the channel is
 // immediately an accurate list rather than starting empty and filling in
-// only as new seeks appear. No-op if already on (in either mode - use
-// setAnnounceQuiet() to switch modes on an already-active channel without a
+// only as new seeks appear. No-op if already on (in any mode - use
+// setAnnounceMode() to switch modes on an already-active channel without a
 // full reset). The on/off state itself is persisted by the caller (see
 // recordConfirmationMessage()) - this only handles the channel's message
 // contents.
-export async function turnOnAnnounce(discordClient: Client, channelId: string, quiet = false): Promise<void> {
+export async function turnOnAnnounce(discordClient: Client, channelId: string, mode: AnnounceMode = 'on'): Promise<void> {
   if (announcements.has(channelId)) return;
 
   const channel = await fetchTextChannel(discordClient, channelId);
   if (channel) {
-    await activateChannel(discordClient, channel, quiet);
+    await activateChannel(discordClient, channel, mode);
   } else {
-    announcements.set(channelId, { tracked: new Map(), quiet });
+    announcements.set(channelId, { tracked: new Map(), mode });
   }
 }
 
@@ -218,8 +331,8 @@ export async function turnOffAnnounce(discordClient: Client, channelId: string):
 // that message can be found and deleted later - either on a graceful
 // shutdown, or as the first thing done when resuming this channel after a
 // restart, since by then it's no longer an accurate "just now" statement.
-export function recordConfirmationMessage(channelId: string, messageId: string, quiet = false): void {
-  setChannelAnnouncing(channelId, messageId, quiet);
+export function recordConfirmationMessage(channelId: string, messageId: string, mode: AnnounceMode = 'on'): void {
+  setChannelAnnouncing(channelId, messageId, mode);
 }
 
 // Drops announcements for seeks that are no longer open. Needed because
@@ -248,11 +361,21 @@ async function reconcile(discordClient: Client): Promise<void> {
 // first connect, not on every reconnect - see registerAnnouncer().
 export async function resumeAnnouncing(discordClient: Client): Promise<void> {
   const state = loadAnnounceState();
-  for (const [channelId, { confirmationMessageId, quiet }] of Object.entries(state)) {
+  for (const [channelId, entry] of Object.entries(state)) {
+    const mode = resolveMode(entry);
     const channel = await fetchTextChannel(discordClient, channelId);
-    if (!channel) continue;
-    await channel.messages.delete(confirmationMessageId).catch(() => {});
-    await activateChannel(discordClient, channel, quiet ?? false);
+    if (!channel) {
+      // Channel fetch can fail transiently (a rate limit, a momentary cache
+      // miss) even though the channel is fine. Falling through here would
+      // leave this channel out of `announcements` while announce-state.json
+      // still says it's on - isAnnouncing() would report off and nothing
+      // would ever post again until someone ran /announce by hand. Mirrors
+      // turnOnAnnounce()'s same fallback for the same reason.
+      announcements.set(channelId, { tracked: new Map(), mode });
+      continue;
+    }
+    await channel.messages.delete(entry.confirmationMessageId).catch(() => {});
+    await activateChannel(discordClient, channel, mode);
   }
 }
 
@@ -273,6 +396,10 @@ export function registerAnnouncer(playtak: PlaytakClient, discordClient: Client)
     if (event.type !== 'seekNew' && event.type !== 'seekRemove') return;
 
     const seek = event.seek;
+    if (event.type === 'seekNew' && seek.isBot !== undefined) {
+      knownBotByName.set(seek.player, seek.isBot);
+    }
+
     // The announcement messages that were advertising this seek. On removal
     // they're handed to seekToGame.ts rather than deleted here, since it can
     // still turn them into "game started" notices - it deletes them itself if

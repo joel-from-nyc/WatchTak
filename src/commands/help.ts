@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, MessageFlags } from 'discord.js';
 
 // Discord caps a command's own description at 100 characters, which isn't
 // enough to fully explain some of these - so /help has its own fuller,
@@ -13,14 +13,16 @@ const HELP_TEXT = [
     'specific. Leave `<game>` blank to just see the active game list, same as `/list`.',
   '**/seeks** - Lists open public seeks on PlayTak - games anyone can join right now. Private challenges aimed ' +
     'at a specific opponent are left out, since only that person can accept them.',
-  '**/announce <on|off|quiet>** - Turns a live list of open public seeks on or off here; leave the argument ' +
-    'blank to check the current status. While on, I post here when a human opens a seek and delete that message ' +
-    'once it is taken or cancelled - so what you see is what you can actually join. I also post a notice with a ' +
-    'Watch button when a seek (or a private challenge, like a rematch) turns into a live game, switching to ' +
-    'Review once that game ends. `quiet` keeps the seek list but turns off those game-started notices. Bot ' +
-    'seeks are skipped entirely; private challenges skip the seek post but can still trigger a game-started ' +
-    'notice. Restricted to members with Manage Channels by default; change who can run it under Server ' +
-    'Settings -> Integrations.',
+  '**/announce <on|off|quiet|noguest|users>** - Turns a live list of open public seeks on or off here; leave ' +
+    'the argument blank to check the current status. While on, I post here when a human opens a seek and delete ' +
+    'that message once it is taken or cancelled - so what you see is what you can actually join. I also post a ' +
+    'notice with a Watch button when a seek (or a private challenge, like a rematch) turns into a live game, ' +
+    'switching to Review once that game ends. The seek list itself is the same in every mode; these only change ' +
+    'which games get that notice: `quiet` turns it off entirely, `noguest` skips any game with a guest account ' +
+    'on either side, and `users` only posts for games with at least one logged-in (non-guest, non-bot) player. ' +
+    'Bot seeks are skipped from the seek list entirely; private challenges skip the seek post but can still ' +
+    'trigger a game-started notice. Restricted to members with Manage Channels by default; change who can run ' +
+    'it under Server Settings -> Integrations.',
   '**/help** - Shows this list.',
 ].join('\n\n');
 
@@ -29,5 +31,5 @@ export const data = new SlashCommandBuilder()
   .setDescription('List available commands, aliases, and what they do');
 
 export async function execute(interaction: ChatInputCommandInteraction) {
-  await interaction.reply(HELP_TEXT);
+  await interaction.reply({ content: HELP_TEXT, flags: MessageFlags.Ephemeral });
 }
