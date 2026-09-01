@@ -1,35 +1,84 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, MessageFlags } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, MessageFlags, PermissionFlagsBits } from 'discord.js';
 
 // Discord caps a command's own description at 100 characters, which isn't
 // enough to fully explain some of these - so /help has its own fuller,
 // hand-written text rather than reusing each command's `data.description`.
-const HELP_TEXT = [
+const COMMANDS = [
   '**/ping** - Health check. Replies with pong and the round-trip latency.',
   '**/list** - Lists PlayTak games currently in progress, with board size, time control, and rated/unrated.',
   '**/watch <game>** (also **/spectate**) - Follows a live PlayTak game: opens a thread (or reuses ' +
     'one already watching it) and posts the board plus each move, in PTN notation, as it happens. `<game>` can be a ' +
     'game ID or a player name - partial names work too and match anywhere in the name, not just the start ' +
     '(e.g. "ppl" matches "gruppler"), but if it matches more than one active game you\'ll be asked to be more ' +
-    'specific. Leave `<game>` blank to just see the active game list, same as `/list`.',
+    'specific. Leave `<game>` blank to just see the active game list, same as `/list`. Moves from before the watch ' +
+    'started (or missed during a long disconnect) appear as "Moves ..." text summaries - `/expand` can draw their boards.',
+  '**/expand here|new** - Run inside a game thread to draw the boards its "Moves ..." catch-up summaries ' +
+    "skipped. `here` edits each summary in place, attaching that stretch's board images (up to 10 per summary). " +
+    '`new` builds a separate replay thread showing every move and board of the game so far, then keeps following ' +
+    'the live game there too. Very long games are capped for `new` - use the ptn.ninja link posted at game end instead.',
   '**/seeks** - Lists open public seeks on PlayTak - games anyone can join right now. Private challenges aimed ' +
     'at a specific opponent are left out, since only that person can accept them.',
-  '**/announce <on|off|quiet|noguest|users>** - Turns a live list of open public seeks on or off here; leave ' +
-    'the argument blank to check the current status. While on, I post here when a human opens a seek and delete ' +
-    'that message once it is taken or cancelled - so what you see is what you can actually join. I also post a ' +
-    'notice with a Watch button when a seek (or a private challenge, like a rematch) turns into a live game, ' +
-    'switching to Review once that game ends. The seek list itself is the same in every mode; these only change ' +
-    'which games get that notice: `quiet` turns it off entirely, `noguest` skips any game with a guest account ' +
-    'on either side, and `users` only posts for games with at least one logged-in (non-guest, non-bot) player. ' +
-    'Bot seeks are skipped from the seek list entirely; private challenges skip the seek post but can still ' +
-    'trigger a game-started notice. Restricted to members with Manage Channels by default; change who can run ' +
-    'it under Server Settings -> Integrations.',
   '**/help** - Shows this list.',
-].join('\n\n');
+];
+
+const MOD_COMMANDS = [
+  '**/announce <on|off|quiet|noguest|users>** - Turn `on` or `off` the announcements of new seeks from human ' +
+    'players and watchable games. `quiet` - only new seeks are displayed. `noguest` - only shows live games without ' +
+    'guests. `users` - only shows games with at least one registered PlayTak user.',
+  '**/showbots <on|off>** - Show or hide bot games in announcements here (default on). No argument checks status.',
+  '**/rating [human] [bot] [off]** - Always announce/watch games between a human and a bot meeting these minimum ' +
+    'ratings, overriding other filters. No argument checks status; `off` clears it.',
+  '**/prune duplicates** - Collapses duplicate watch threads for the same game down to one, keeping the live ' +
+    'thread or whichever has more messages. Skips (and reports) any set where a human posted.',
+  "**/prune threads** - Removes watch threads that no longer match this channel's current /announce/showbots/" +
+    'rating settings. Live games are never touched; removed threads with human messages are flagged.',
+  '**/prune messages** - Removes channel messages that no longer match current rules, plus old public /ping, ' +
+    '/list, or /seeks replies (now private-only).',
+];
+
+// Discord rejects any single message body over 2000 characters. Each labeled
+// section is sent as its own message already comfortably under that, but
+// still packed/split defensively rather than assumed safe, so this can't
+// silently break again the next time a line is added.
+const DISCORD_MESSAGE_LIMIT = 1900;
+
+function chunk(header: string, entries: string[]): string[] {
+  const chunks: string[] = [];
+  let current = header;
+  for (const entry of entries) {
+    const withEntry = `${current}\n${entry}`;
+    if (withEntry.length > DISCORD_MESSAGE_LIMIT && current !== header) {
+      chunks.push(current);
+      current = `${header}\n${entry}`;
+    } else {
+      current = withEntry;
+    }
+  }
+  chunks.push(current);
+  return chunks;
+}
+
+const COMMAND_CHUNKS = chunk('**Commands**', COMMANDS);
+const MOD_COMMAND_CHUNKS = chunk('**Mod Commands** (require Manage Channels)', MOD_COMMANDS);
 
 export const data = new SlashCommandBuilder()
   .setName('help')
   .setDescription('List available commands, aliases, and what they do');
 
 export async function execute(interaction: ChatInputCommandInteraction) {
-  await interaction.reply({ content: HELP_TEXT, flags: MessageFlags.Ephemeral });
+  await interaction.reply({ content: COMMAND_CHUNKS[0], flags: MessageFlags.Ephemeral });
+  for (const chunk of COMMAND_CHUNKS.slice(1)) {
+    await interaction.followUp({ content: chunk, flags: MessageFlags.Ephemeral });
+  }
+
+  // Same permission /announce, /showbots, /rating, and /prune already
+  // require to run - checked directly rather than trusting the invite-time
+  // default, since a server's admins can loosen or tighten any command's
+  // permission per-server without this ever being redeployed to match.
+  const isMod = interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels) ?? false;
+  if (!isMod) return;
+
+  for (const chunk of MOD_COMMAND_CHUNKS) {
+    await interaction.followUp({ content: chunk, flags: MessageFlags.Ephemeral });
+  }
 }

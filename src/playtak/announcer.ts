@@ -12,6 +12,9 @@ import {
 } from './announceStore';
 import { formatGameType, formatKomi, formatSeekColor } from './format';
 import { notifySeekRemoved, SeekMessageRef } from './seekToGame';
+import { getShowBots } from './showBotsStore';
+import { getRatingRule, RatingRule } from './ratingStore';
+import { getRating, isRatedBot, formatPlayerBold } from './ratings';
 
 // How long to let PlayTak's post-(re)connect burst of `Seek new` lines land
 // before reconciling or resuming. On every (re)connect the server replays
@@ -86,23 +89,84 @@ function isGuestName(name: string): boolean {
 // rather than hiding one on a guess.
 function isConfirmedBot(name: string, seek: Seek | undefined): boolean {
   if (seek && seek.player === name && seek.isBot !== undefined) return seek.isBot;
-  return knownBotByName.get(name) === true;
+  if (knownBotByName.get(name) === true) return true;
+  // Closes a gap knownBotByName can't: a bot that only ever accepts seeks
+  // (never posts its own) never shows up on a `Seek new` line as itself, so
+  // the wire protocol alone can't identify it. PlayTak's own ratings list
+  // flags it regardless (see ratings.ts).
+  return isRatedBot(name) === true;
 }
 
 function isLoggedInUser(name: string, seek: Seek | undefined): boolean {
   return !isGuestName(name) && !isConfirmedBot(name, seek);
 }
 
+// Everything below this point that inspects "a game" only ever reads these
+// two fields, never board size/time control/etc - so it's typed against just
+// this shape rather than the full GameListEntry. That's what lets
+// wouldGameNoticeBeAllowed() (see below) re-run the same logic against a pair
+// of names recovered from old message text, with no real GameListEntry to
+// hand it.
+type NamedGame = Pick<GameListEntry, 'white' | 'black'>;
+
+// A bot-vs-bot game is never worth a notice in any mode, including `on` -
+// nobody watching /announce can join or usefully spectate two bots playing
+// each other, so this is a hard exclusion rather than another mode option.
+function isBotVsBot(game: NamedGame, seek: Seek | undefined): boolean {
+  return isConfirmedBot(game.white, seek) && isConfirmedBot(game.black, seek);
+}
+
+// Whether `game` matches a channel's /rating override - a human at least
+// `rule.humanMin` playing a bot at least `rule.botMin` (either bound omitted
+// means no minimum on that side). Checks both ways round, since `game.white`/
+// `game.black` don't say which one is meant to be the "human" side. A match
+// here forces the game to be shown regardless of `mode`/`showBots` - see
+// modeAllowsGame().
+function ratingOverrideMatches(rule: RatingRule | undefined, game: NamedGame, seek: Seek | undefined): boolean {
+  if (!rule) return false;
+
+  for (const [human, bot] of [
+    [game.white, game.black],
+    [game.black, game.white],
+  ]) {
+    // isLoggedInUser() already excludes bots as well as guests.
+    if (!isLoggedInUser(human, seek) || !isConfirmedBot(bot, seek)) continue;
+    const humanRating = getRating(human);
+    const botRating = getRating(bot);
+    if (humanRating === undefined || botRating === undefined) continue;
+    if (rule.humanMin !== undefined && humanRating < rule.humanMin) continue;
+    if (rule.botMin !== undefined && botRating < rule.botMin) continue;
+    return true;
+  }
+  return false;
+}
+
 // Whether a channel in `mode` should get a game-started notice for `game`.
 // `seek` is the seek that was matched to this game, when there was one (see
 // seekToGame.ts) - it's the only source of bot-status the protocol offers,
-// and only for whichever side created the seek.
-function modeAllowsGame(mode: AnnounceMode, game: GameListEntry, seek: Seek | undefined): boolean {
+// and only for whichever side created the seek. `showBots` is this channel's
+// /showbots setting - when off, any game with a confirmed bot on either side
+// is excluded outright, on top of whatever `mode` would otherwise allow -
+// unless `ratingRule` overrides that (see ratingOverrideMatches()).
+//
+// `quiet` is checked before the rating override deliberately: that mode means
+// "no game-started notices at all here", so it stays truly quiet rather than
+// being punched through by an override. Every other filter - showbots,
+// noguest, users - does yield to a matching override.
+function modeAllowsGame(
+  mode: AnnounceMode,
+  game: NamedGame,
+  seek: Seek | undefined,
+  showBots: boolean,
+  ratingRule: RatingRule | undefined,
+): boolean {
+  if (isBotVsBot(game, seek)) return false;
+  if (mode === 'quiet') return false;
+  if (ratingOverrideMatches(ratingRule, game, seek)) return true;
+  if (!showBots && (isConfirmedBot(game.white, seek) || isConfirmedBot(game.black, seek))) return false;
   switch (mode) {
     case 'on':
       return true;
-    case 'quiet':
-      return false;
     case 'noguest':
       return !isGuestName(game.white) && !isGuestName(game.black);
     case 'users':
@@ -116,7 +180,7 @@ function describeSeek(seek: Seek): string {
   const gameType = formatGameType(seek.unrated, seek.tournament);
   const komi = formatKomi(seek.komi);
   return (
-    `**${seek.player}** ${ANNOUNCEMENT_MARKER} ${seek.boardSize}x${seek.boardSize}, ` +
+    `${formatPlayerBold(seek.player)} ${ANNOUNCEMENT_MARKER} ${seek.boardSize}x${seek.boardSize}, ` +
     `${minutes}+${seek.incrementSeconds}, ${komi} komi, ${color}, ${gameType}\n` +
     // Angle brackets inside the masked link suppress Discord's link-preview
     // embed, leaving just the clickable text.
@@ -155,7 +219,7 @@ export function setAnnounceMode(channelId: string, mode: AnnounceMode): void {
 // used by seekToGame.ts when it has an existing seek announcement it could
 // convert into one.
 export function isGameNoticeAllowed(channelId: string, game: GameListEntry, seek: Seek | undefined): boolean {
-  return modeAllowsGame(getAnnounceMode(channelId), game, seek);
+  return modeAllowsGame(getAnnounceMode(channelId), game, seek, getShowBots(channelId), getRatingRule(channelId));
 }
 
 // Channels eligible for a fresh "started!" notice for `game` right now -
@@ -163,8 +227,31 @@ export function isGameNoticeAllowed(channelId: string, game: GameListEntry, seek
 // seek announcement to convert (a private/rematch-derived game).
 export function listAnnouncingChannelIds(game: GameListEntry, seek: Seek | undefined): string[] {
   return [...announcements.entries()]
-    .filter(([, state]) => modeAllowsGame(state.mode, game, seek))
+    .filter(([channelId, state]) => modeAllowsGame(state.mode, game, seek, getShowBots(channelId), getRatingRule(channelId)))
     .map(([channelId]) => channelId);
+}
+
+// Re-derives "would this channel's current settings allow a game-started
+// notice for these two players" from names alone - no seek/game object
+// needed, since `seek: undefined` just means bot-detection falls back to
+// `knownBotByName`/`isRatedBot()` (identity-based, not tied to a specific
+// seek). Used by /prune to decide whether an old notice, parsed back out of
+// its own message text, still matches the rules.
+export function wouldGameNoticeBeAllowed(channelId: string, white: string, black: string): boolean {
+  return modeAllowsGame(getAnnounceMode(channelId), { white, black }, undefined, getShowBots(channelId), getRatingRule(channelId));
+}
+
+// Whether `messageId` is still a live-tracked seek announcement in this
+// channel - i.e. it could still be converted into (or already is on its way
+// to becoming) a game-started notice, so /prune must leave it alone rather
+// than risk deleting something announcer.ts still has a reference to.
+export function isTrackedSeekMessage(channelId: string, messageId: string): boolean {
+  const tracked = announcements.get(channelId)?.tracked;
+  if (!tracked) return false;
+  for (const trackedMessageId of tracked.values()) {
+    if (trackedMessageId === messageId) return true;
+  }
+  return false;
 }
 
 export async function fetchTextChannel(discordClient: Client, channelId: string): Promise<TextChannel | null> {

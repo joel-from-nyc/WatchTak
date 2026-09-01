@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, MessageFlags } from 'discord.js';
 import { buildSeeksReply } from '../playtak/seeksReply';
 
 export const data = new SlashCommandBuilder()
@@ -6,5 +6,5 @@ export const data = new SlashCommandBuilder()
   .setDescription('List currently open public seeks on PlayTak');
 
 export async function execute(interaction: ChatInputCommandInteraction) {
-  await interaction.reply(buildSeeksReply());
+  await interaction.reply({ content: buildSeeksReply(), flags: MessageFlags.Ephemeral });
 }

@@ -57,7 +57,18 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   await interaction.deferReply();
   const { thread, alreadyWatching } = await watchGame(getPlaytakClient(), interaction.channel, game);
-  await interaction.editReply(
-    alreadyWatching ? `Already watching. Spectate: ${thread}` : `Spectate: ${thread}`,
-  );
+
+  if (alreadyWatching) {
+    // A thread for this game already exists (whether this process was
+    // already watching it, or one turned up from before a restart - see
+    // watchGame()'s "one thread per game" rule) - swap the public deferred
+    // placeholder for a private link instead of a public "already watching"
+    // post, so multiple people trying to watch the same popular game don't
+    // spam the channel.
+    await interaction.deleteReply().catch(() => {});
+    await interaction.followUp({ content: `This game already has a thread. Spectate: ${thread}`, ephemeral: true });
+    return;
+  }
+
+  await interaction.editReply(`Spectate: ${thread}`);
 }

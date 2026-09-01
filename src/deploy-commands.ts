@@ -7,6 +7,10 @@ import * as help from './commands/help';
 import * as seeks from './commands/seeks';
 import * as spectate from './commands/spectate';
 import * as announce from './commands/announce';
+import * as showbots from './commands/showbots';
+import * as rating from './commands/rating';
+import * as prune from './commands/prune';
+import * as expand from './commands/expand';
 
 // Same env-file selection as index.ts - which instance's commands get
 // registered depends on which env file is loaded, so this must be explicit
@@ -30,6 +34,10 @@ const commands = [
   seeks.data.toJSON(),
   spectate.data.toJSON(),
   announce.data.toJSON(),
+  showbots.data.toJSON(),
+  rating.data.toJSON(),
+  prune.data.toJSON(),
+  expand.data.toJSON(),
 ];
 
 const rest = new REST().setToken(DISCORD_TOKEN);

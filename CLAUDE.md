@@ -22,6 +22,21 @@ separate instance, not a second server on the same process):
   partial player name - matched anywhere in the name, not just the start -
   (ambiguous matches ask the user to be more specific); with no argument
   it behaves like `/list`.
+- `/expand here|new` — run inside a game thread. Catch-up summaries
+  (posted when a thread starts mid-game, or after a reconnect gap of more
+  than 10 plies) are "Moves 3W-7B" chunk messages of ≤10 plies each, sized
+  to Discord's 10-attachments-per-message cap. `here` edits each unfilled
+  summary in place, attaching one board PNG per ply as a plain gallery (a
+  takeback that rewrote a summarized move marks that summary stale instead
+  of drawing wrong boards). `new` builds a separate "Replay: ... - game N"
+  thread with one message+board per ply, then attaches it as a live mirror
+  of the watch so both threads get subsequent moves (mirror is in-memory
+  only: a restart orphans the replay thread and Discord's 24h auto-archive
+  retires it; its name deliberately doesn't match the watcher's `(#N)`
+  thread-name pattern so the sweep never adopts it). Games over 150 plies
+  refuse `new` — the ptn.ninja link covers those. Reconnect gaps of ≤10
+  plies never produce summaries at all: the watcher just draws each missed
+  move inline, since that costs the same number of messages.
 - `/seeks` — lists currently open public seeks (private challenges aimed
   at one specific opponent are excluded, since no one else can accept
   them). Lists bot and human seeks alike.
@@ -36,9 +51,19 @@ separate instance, not a second server on the same process):
   resumes announcing in any channel that was on, and on a graceful stop
   (`SIGINT`/`SIGTERM`) it deletes the "now on" confirmation message in
   each one first, since it's stale the instant the bot goes down.
+- `/showbots <on|off>` — per-channel, persisted independently of
+  `/announce` (`showBotsStore.ts`) so it survives that being off. When
+  off, any game with a confirmed bot on either side is dropped from
+  game-started notices. Bot *seeks* were already never announced, so
+  this only affects game notices.
+- `/rating human:<n> bot:<n>` — a standing per-channel override
+  (`ratingStore.ts`): a human rated at least `human` playing a bot rated
+  at least `bot` is always shown, beating `/showbots`, `noguest`, and
+  `users`. It deliberately does *not* beat `quiet`, which means "no game
+  notices here at all". `/rating off` clears it.
 - `/help` — full explanation of every command and its aliases (Discord
   caps a command's own description at 100 characters, so this is the
-  fuller version).
+  fuller version). Keep the per-command lines here terse.
 
 ## Architecture
 - `src/playtak/client.ts` — the single guest WebSocket connection to
@@ -70,9 +95,37 @@ separate instance, not a second server on the same process):
   against live state (self-heals desyncs, closes threads for games that
   ended while the bot was offline). See that file's comments for why this
   replaces a persisted store. On a reconnect, a thread that was already
-  being watched gets the moves it missed while disconnected printed as
-  text (not redrawn board-per-move) followed by one current-position
-  board - `WatchState.historyMode`'s `'reconnect'` case.
+  being watched gets the moves it missed while disconnected drawn inline
+  (board-per-move) when the gap is ≤10 plies, or posted as
+  /expand-fillable chunk summaries plus one current-position board when
+  it's larger - `WatchState.historyMode`'s `'reconnect'` case.
+- `src/playtak/catchup.ts` — the chunk-summary vocabulary shared by
+  `watcher.ts` (which posts them) and `commands/expand.ts` (which fills
+  them). The design insight that unshelved `/expand`: Discord can't insert
+  messages into a thread's past, but the tail *at catch-up time* is the
+  right place in the timeline, and a bot may edit its own old messages to
+  add attachments - so ≤10-ply chunk messages posted at catch-up time act
+  as permanent slots `/expand here` later fills in place (10 is Discord's
+  attachment cap per message; plain attachments, no embeds). The chunk
+  header `Moves 3W-7B` doubles as the machine-readable marker both
+  `/expand`'s scan and `findKnownPlyCount()`'s restart recovery parse.
+- `src/playtak/ratings.ts` — player ratings, which the WebSocket protocol
+  carries nowhere. Polls `https://playtak.com/ratinglist.json` (the same
+  endpoint playtak.com's own ratings page loads, confirmed by reading its
+  `js/ratinglist.js`) every 20 minutes into an in-memory map. A row is
+  `[name(s), rating, activeRating, games, isBot]`; the name field can hold
+  several space-separated aliases for one renamed account, so every token
+  is keyed to the same entry, and a rating of `0` is PlayTak's own "not
+  rated yet" sentinel. Its `isBot` flag also backs up `announcer.ts`'s
+  `knownBotByName`, catching bots that only ever *accept* seeks and so
+  never appear on a `Seek new` line of their own.
+- `src/playtak/gameTimes.ts` — when this process saw each game start. The
+  protocol has no start timestamp and the public archive only gains a
+  record once a game has *finished*, so a game already running when the
+  bot connects has no knowable start time and its "Started" line is
+  omitted rather than guessed. The archive's `date` field is the game's
+  start (ids are issued at start, and `date` never runs out of order with
+  them); no end timestamp is stored anywhere.
 - `src/playtak/ptn.ts`, `ptnLink.ts`, `result.ts`, `boardImage.ts` — PTN
   notation conversion, `ptn.ninja` link building (with link shortening),
   human-readable game results, and board-image rendering (via the
@@ -124,3 +177,6 @@ invent new bot features unprompted. Known open items:
 1. Continue testing `/watch`, `/list`, `/seeks`, and `/announce` on the
    private test server.
 2. When ready, bring the bot to the Tak Talk Discord server.
+3. Test `/expand here`/`/expand new` and the new catch-up behavior (inline
+   boards for small reconnect gaps, chunked summaries otherwise) on the
+   private test server.

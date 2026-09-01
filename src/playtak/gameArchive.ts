@@ -16,6 +16,18 @@ export interface ArchivedGame {
   tournament: boolean;
   result: string;
   plies: string[];
+  // When the game began, as epoch milliseconds. The archive's `date` field is
+  // the game's *start*, not its end: game ids are handed out at game start,
+  // and across a 100-game sample `date` never once ran out of order with the
+  // id, which end-times would (a long game started earlier finishes after a
+  // short one started later). The record itself only appears once the game is
+  // over - ids above the newest archived game all return null - so there's no
+  // end timestamp stored anywhere to show.
+  startedAtMs: number;
+  // Each player's rating at the time this game was played, which is what
+  // belongs on a reconstructed thread - not their rating today.
+  ratingWhite?: number;
+  ratingBlack?: number;
 }
 
 // Same wire-token shapes protocol.ts's placeMatch/moveMatch parse from live
@@ -64,6 +76,9 @@ interface ArchiveResponse {
   tournament: number;
   result: string;
   notation: string;
+  date: number;
+  rating_white: number;
+  rating_black: number;
 }
 
 // Fetches a finished game's full record from PlayTak's public game-history
@@ -102,6 +117,12 @@ export async function fetchArchivedGame(gameNo: number): Promise<ArchivedGame | 
       tournament: body.tournament === 1,
       result: body.result,
       plies,
+      startedAtMs: body.date,
+      // 0 is the archive's "no rating" value, the same sentinel the ratings
+      // list uses (see ratings.ts) - treat it as unknown rather than showing
+      // a player as rated zero.
+      ratingWhite: body.rating_white || undefined,
+      ratingBlack: body.rating_black || undefined,
     };
   } catch (err) {
     console.error(`Failed to fetch archived game #${gameNo}:`, err);

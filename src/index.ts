@@ -7,10 +7,15 @@ import * as help from './commands/help';
 import * as seeks from './commands/seeks';
 import * as spectate from './commands/spectate';
 import * as announce from './commands/announce';
+import * as showbots from './commands/showbots';
+import * as rating from './commands/rating';
+import * as prune from './commands/prune';
+import * as expand from './commands/expand';
 import { initPlaytak, getGameRegistry, getPlaytakClient } from './playtak/shared';
 import { registerWatcher, watchGame, getWatchedThread, reconstructThread } from './playtak/watcher';
 import { registerAnnouncer, shutdownAnnouncer } from './playtak/announcer';
 import { registerSeekToGame } from './playtak/seekToGame';
+import { startRatingsRefresh } from './playtak/ratings';
 
 // Which .env file to load - defaults to plain .env, but a specific instance
 // (e.g. `node dist/index.js .env.production`) can point at its own file, so
@@ -43,6 +48,10 @@ commands.set(help.data.name, help);
 commands.set(seeks.data.name, seeks);
 commands.set(spectate.data.name, spectate);
 commands.set(announce.data.name, announce);
+commands.set(showbots.data.name, showbots);
+commands.set(rating.data.name, rating);
+commands.set(prune.data.name, prune);
+commands.set(expand.data.name, expand);
 
 client.once('ready', (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
@@ -51,6 +60,7 @@ client.once('ready', (readyClient) => {
   registerWatcher(playtak, readyClient, gameRegistry);
   registerAnnouncer(playtak, readyClient);
   registerSeekToGame(playtak, readyClient);
+  startRatingsRefresh();
 });
 
 // customId shapes set by seekToGame.ts's game-started notice buttons -
@@ -84,7 +94,9 @@ client.on('interactionCreate', async (interaction) => {
 
         await interaction.deferReply({ ephemeral: true });
         const { thread, alreadyWatching } = await watchGame(getPlaytakClient(), interaction.channel, game);
-        await interaction.editReply(alreadyWatching ? `Already watching. Spectate: ${thread}` : `Spectate: ${thread}`);
+        await interaction.editReply(
+          alreadyWatching ? `This game already has a thread. Spectate: ${thread}` : `Spectate: ${thread}`,
+        );
         return;
       }
 
@@ -125,13 +137,37 @@ client.on('interactionCreate', async (interaction) => {
 // SIGTERM) - a crash or `kill -9` skips this, but that's fine, since
 // resumeAnnouncing() cleans up the stale message on the next startup
 // regardless of how the previous run ended.
+//
+// The cleanup is best-effort and hard-capped: every step in it is a Discord
+// REST call, and a hung or unreachable API (or a channel the bot has lost
+// access to) would otherwise leave the process alive forever with the
+// service manager stuck in STOP_PENDING - which is exactly what used to
+// happen. Exiting without the cleanup is harmless; resumeAnnouncing() sweeps
+// the stale message on the next start regardless of how this run ended.
+const SHUTDOWN_TIMEOUT_MS = 4000;
+
 let shuttingDown = false;
 async function shutdown(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`Received ${signal}, shutting down...`);
+
+  // Outer backstop covering everything below, client.destroy() included -
+  // so it is deliberately never cleared; process.exit(0) at the end of a
+  // normal shutdown gets there first. unref() so the timer itself is never
+  // what holds the process open.
+  setTimeout(() => {
+    console.error(`Shutdown did not finish within ${SHUTDOWN_TIMEOUT_MS}ms - exiting anyway.`);
+    process.exit(0);
+  }, SHUTDOWN_TIMEOUT_MS).unref();
+
+  // Inner cap on just the cleanup, set below the outer one so a hung
+  // announcer still leaves room for client.destroy() to run.
   try {
-    await shutdownAnnouncer(client);
+    await Promise.race([
+      shutdownAnnouncer(client),
+      new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_TIMEOUT_MS - 500).unref()),
+    ]);
   } catch (err) {
     console.error('Error during shutdown cleanup:', err);
   }

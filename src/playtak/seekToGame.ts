@@ -3,6 +3,9 @@ import { PlaytakClient } from './client';
 import { GameListEntry, Seek } from './protocol';
 import { fetchTextChannel, listAnnouncingChannelIds, isGameNoticeAllowed, notePostOutcome } from './announcer';
 import { getWatchedThread } from './watcher';
+import { formatPlayerBold } from './ratings';
+import { discordTime, formatDuration } from './format';
+import { noteGameStarted, getGameStartedAt } from './gameTimes';
 
 // PlayTak's wire protocol gives no id linking a seek to the game it becomes -
 // a `Seek remove` fires identically whether the seek was cancelled or just
@@ -58,6 +61,18 @@ const noticesByGame = new Map<number, { refs: SeekMessageRef[]; white: string; b
 
 let replayingUntil = 0;
 
+// Whether `messageId` is still the live notice for a game noticesByGame is
+// tracking - i.e. an in-progress game whose "has started!" notice will get
+// swapped in place for a "has finished." one once it ends (see
+// retireGameNotice()). /prune must leave this alone even if it no longer
+// matches current rules, per its "skip live notices" scope.
+export function isTrackedGameMessage(messageId: string): boolean {
+  for (const notice of noticesByGame.values()) {
+    if (notice.refs.some((ref) => ref.messageId === messageId)) return true;
+  }
+  return false;
+}
+
 function watchRow(gameNo: number): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`watch:${gameNo}`).setLabel('Watch game').setStyle(ButtonStyle.Primary),
@@ -78,6 +93,17 @@ async function deleteRefs(discordClient: Client, refs: SeekMessageRef[]): Promis
   }
 }
 
+// "X vs Y (#123) has started!" plus, on its own line, when that happened -
+// kept outside any code block so Discord renders it in each viewer's own
+// timezone (see format.ts's discordTime()). The timestamp keeps ticking on
+// its own in every client, so the notice stays accurate without re-editing.
+function startedContent(game: GameListEntry): string {
+  const headline =
+    `${formatPlayerBold(game.white)} vs ${formatPlayerBold(game.black)} (#${game.gameNo}) has started!`;
+  const startedAt = getGameStartedAt(game.gameNo);
+  return startedAt === undefined ? headline : `${headline}\nStarted ${discordTime(startedAt)}`;
+}
+
 // Turns the seek's own announcement into the game-started notice rather than
 // deleting it and posting a fresh message - same message slot, so an active
 // channel doesn't accumulate two posts per game.
@@ -86,7 +112,7 @@ async function convertToGameNotice(
   game: GameListEntry,
   refs: SeekMessageRef[],
 ): Promise<void> {
-  const content = `**${game.white}** vs **${game.black}** (#${game.gameNo}) has started!`;
+  const content = startedContent(game);
   const landed: SeekMessageRef[] = [];
 
   for (const ref of refs) {
@@ -115,7 +141,7 @@ async function convertToGameNotice(
 // in quiet mode, so it behaves the same as a converted one from here on
 // (same retirement/pruning path, same button).
 async function postFreshGameNotice(discordClient: Client, game: GameListEntry, seek: Seek | undefined): Promise<void> {
-  const content = `**${game.white}** vs **${game.black}** (#${game.gameNo}) has started!`;
+  const content = startedContent(game);
   const landed: SeekMessageRef[] = [];
 
   for (const channelId of listAnnouncingChannelIds(game, seek)) {
@@ -178,7 +204,14 @@ async function retireGameNotice(discordClient: Client, gameNo: number): Promise<
     await starter?.delete().catch(() => {});
   }
 
-  const content = `**${notice.white}** vs **${notice.black}** (#${gameNo}) has finished.`;
+  const endedAt = Date.now();
+  const startedAt = getGameStartedAt(gameNo);
+  const timeLine =
+    startedAt === undefined
+      ? `Ended ${discordTime(endedAt)}`
+      : `Ended ${discordTime(endedAt)} · lasted ${formatDuration(endedAt - startedAt)}`;
+  const content =
+    `${formatPlayerBold(notice.white)} vs ${formatPlayerBold(notice.black)} (#${gameNo}) has finished.\n${timeLine}`;
   for (const ref of notice.refs) {
     const channel = await fetchTextChannel(discordClient, ref.channelId);
     if (!channel) continue;
@@ -201,6 +234,17 @@ function isPrivateHumanSeek(seek: Seek): boolean {
   return seek.opponent !== '' && seek.isBot === false;
 }
 
+// A public seek posted by a bot - announcer.ts deliberately never shows these
+// (see isAnnounceable(); bots keep seeks open near-permanently, and would
+// bury the human ones the seek list exists for), so refs is always empty for
+// one. But if a human accepts it, that's exactly the kind of game-started
+// event /announce exists for - so it needs tracking here the same way a
+// private human seek is, letting announceGame()'s mode filter make the real
+// call on whether it gets a notice.
+function isBotPublicSeek(seek: Seek): boolean {
+  return seek.opponent === '' && seek.isBot === true;
+}
+
 // Called from announcer.ts the moment a seek disappears, handing over the
 // announcement messages that were advertising it (empty for a seek that was
 // never shown anywhere - either private, or public but posted to no
@@ -210,7 +254,7 @@ function isPrivateHumanSeek(seek: Seek): boolean {
 // deletion only applies to real refs, since there's nothing to delete for a
 // private seek that never panned out.
 export function notifySeekRemoved(discordClient: Client, seek: Seek, refs: SeekMessageRef[]): void {
-  if (refs.length === 0 && !isPrivateHumanSeek(seek)) return;
+  if (refs.length === 0 && !isPrivateHumanSeek(seek) && !isBotPublicSeek(seek)) return;
 
   const matchIndex = pendingGames.findIndex((p) => p.game.white === seek.player || p.game.black === seek.player);
   if (matchIndex !== -1) {
@@ -239,6 +283,11 @@ export function notifySeekRemoved(discordClient: Client, seek: Seek, refs: SeekM
 
 function notifyGameAdded(discordClient: Client, game: GameListEntry): void {
   if (Date.now() < replayingUntil) return;
+
+  // Past the replay guard, so this is a game genuinely starting right now
+  // rather than an old one being re-listed after a (re)connect - which makes
+  // this the one and only moment its start time is knowable (see gameTimes.ts).
+  noteGameStarted(game.gameNo);
 
   const matchIndex = pendingRemovals.findIndex((p) => p.seek.player === game.white || p.seek.player === game.black);
   if (matchIndex !== -1) {

@@ -35,6 +35,20 @@ export function spreadToPtn(move: SpreadMove): string {
   return `${countPrefix}${move.fromSquare.toLowerCase()}${direction}${dropCounts}`;
 }
 
+// "1W", "1B", "2W"... - the move-number-plus-color label for an absolute ply
+// index (0 = white's first move). The same shape the watcher's "Move:" lines
+// and catch-up chunk headers use, so a ply count can be recovered from a
+// thread's own message history by parsing the label back (see
+// moveLabelToPly and findKnownPlyCount() in watcher.ts).
+export function plyToMoveLabel(ply: number): string {
+  return `${Math.floor(ply / 2) + 1}${ply % 2 === 0 ? 'W' : 'B'}`;
+}
+
+// Reverses plyToMoveLabel() from its parsed-out parts.
+export function moveLabelToPly(moveNumber: number, colorLetter: 'W' | 'B'): number {
+  return (moveNumber - 1) * 2 + (colorLetter === 'W' ? 0 : 1);
+}
+
 // Formats a flat list of plies (in play order, starting with white) as
 // numbered PTN move text, e.g. "1. a1 f6 2. Cd4 Sd3". `startPly` is the
 // absolute ply index (0 = white's first move) that `plies[0]` represents -
