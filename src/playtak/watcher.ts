@@ -34,8 +34,14 @@ const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 // Posted verbatim whenever a game-over is detected, whether live or by the
 // sweep. sweepThreads() checks a thread's recent messages for this exact
 // text to avoid re-posting it (and re-arming a fresh 24h timer) on every
-// pass - see sweepThreads().
+// pass - see sweepThreads() and findCloseWarningMessage().
 const CLOSE_WARNING_PREFIX = 'This thread will be archived';
+
+// What closeThread() rewrites the warning message to once it actually
+// archives the thread - the countdown in the original post is no longer
+// useful once the event it counted down to has happened, so this replaces it
+// with a plain record of when that was.
+const CLOSE_ARCHIVED_PREFIX = 'This thread was archived on';
 
 // Embedded in every thread's name so a restarted bot (with no memory of its
 // own) can recover which PlayTak game a thread belongs to just by reading
@@ -385,7 +391,18 @@ async function resolveLowTimeWarning(state: WatchState, afterMove: boolean): Pro
   await warning.message.edit(staleWarningText(state, warning.color, afterMove)).catch(() => {});
 }
 
-async function closeThread(thread: ThreadChannel): Promise<void> {
+// `warningMessage` is the original "will be archived" post, when the caller
+// already has it in hand (scheduleClose()'s own timer does); otherwise it's
+// looked up fresh - the cold-restart path through sweepThreads() has no
+// in-memory reference to reuse. `:D` (a plain date, no time) matches the
+// "archived on" wording - the exact time isn't especially useful once the
+// countdown that used to show it is gone.
+async function closeThread(thread: ThreadChannel, warningMessage?: Message): Promise<void> {
+  const message = warningMessage ?? (await findCloseWarningMessage(thread));
+  if (message) {
+    await message.edit(`${CLOSE_ARCHIVED_PREFIX} <t:${Math.floor(Date.now() / 1000)}:D>.`).catch(() => {});
+  }
+
   await thread.setArchived(true).catch((err) => {
     console.error(`Failed to archive thread ${thread.id}:`, err);
   });
@@ -487,10 +504,10 @@ function beginObserving(playtak: PlaytakClient, state: WatchState): void {
 
 async function scheduleClose(thread: ThreadChannel): Promise<void> {
   const closeAtMs = Date.now() + THREAD_CLOSE_DELAY_MS;
-  await thread
+  const message = await thread
     .send(`${CLOSE_WARNING_PREFIX} <t:${Math.floor(closeAtMs / 1000)}:R>.`)
-    .catch(() => {});
-  setTimeout(() => closeThread(thread), THREAD_CLOSE_DELAY_MS);
+    .catch(() => undefined);
+  setTimeout(() => closeThread(thread, message), THREAD_CLOSE_DELAY_MS);
 }
 
 async function handleGameEnd(playtak: PlaytakClient, state: WatchState, resultText: string): Promise<void> {
@@ -874,10 +891,13 @@ async function createReconstructedThread(parentChannel: TextChannel, gameNo: num
   return thread;
 }
 
-async function hasAlreadyWarnedClose(thread: ThreadChannel): Promise<boolean> {
+// Finds this thread's own "will be archived" post, if it already has one -
+// used both to detect that (so sweepThreads() doesn't re-post it and re-arm
+// a fresh 24h timer on every pass) and, via closeThread()'s fallback lookup,
+// to find the message to rewrite once the thread's actually archived.
+async function findCloseWarningMessage(thread: ThreadChannel): Promise<Message | undefined> {
   const recent = await thread.messages.fetch({ limit: 10 }).catch(() => null);
-  if (!recent) return false;
-  return recent.some((message) => message.content.includes(CLOSE_WARNING_PREFIX));
+  return recent?.find((message) => message.content.includes(CLOSE_WARNING_PREFIX));
 }
 
 // Matches the "Move: <number><W/B>. <ptn>" line every move/undo post carries
@@ -1020,8 +1040,9 @@ export async function sweepThreads(discordClient: Client, playtak: PlaytakClient
 
       if (activeWatches.has(gameNo)) continue; // handleGameEnd is already handling this one
 
-      if (await hasAlreadyWarnedClose(thread)) {
-        await closeThread(thread);
+      const warningMessage = await findCloseWarningMessage(thread);
+      if (warningMessage) {
+        await closeThread(thread, warningMessage);
       } else {
         await thread.send('This game appears to have ended.').catch(() => {});
         await scheduleClose(thread);
