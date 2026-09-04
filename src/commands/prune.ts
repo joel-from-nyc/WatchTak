@@ -3,6 +3,7 @@ import { wouldGameNoticeBeAllowed, isTrackedSeekMessage } from '../playtak/annou
 import { isTrackedGameMessage } from '../playtak/seekToGame';
 import { isGameActivelyWatched, getWatchedThread, parseThreadName } from '../playtak/watcher';
 import { areRatingsLoaded } from '../playtak/ratings';
+import { getGameRegistry } from '../playtak/shared';
 
 export const data = new SlashCommandBuilder()
   .setName('prune')
@@ -11,10 +12,12 @@ export const data = new SlashCommandBuilder()
     sub.setName('duplicates').setDescription('Collapse duplicate watch threads for the same game (skips ones with human chat)'),
   )
   .addSubcommand((sub) =>
-    sub.setName('threads').setDescription("Remove watch threads no longer matching this channel's rules (live games untouched)"),
+    sub
+      .setName('threads')
+      .setDescription('Remove stale/rule-mismatched watch threads (live games untouched)'),
   )
   .addSubcommand((sub) =>
-    sub.setName('messages').setDescription("Remove channel messages no longer matching this channel's rules"),
+    sub.setName('messages').setDescription('Remove stale/rule-mismatched channel messages'),
   )
   // Same default as /announce, /showbots, /rating - Manage Channels.
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels);
@@ -24,7 +27,8 @@ export const data = new SlashCommandBuilder()
 // enough to survive either verb, tightly enough that nothing else in the
 // channel accidentally matches. Player names never contain spaces (PlayTak
 // usernames are single wire tokens), so splitting on " vs " is unambiguous.
-const NOTICE_LINE_PATTERN = /^(.+?) vs (.+?) \(#\d+\) has (?:started!|finished\.)$/;
+// The game number is captured too, for the orphaned-notice check below.
+const NOTICE_LINE_PATTERN = /^(.+?) vs (.+?) \(#(\d+)\) has (?:started!|finished\.)$/;
 
 // Reverses formatPlayerBold()'s "**name**" / "**name** (rating)" shape back
 // to the bare name - that function is the only place that builds this exact
@@ -78,6 +82,23 @@ const THREAD_PAGE_SIZE = 100;
 // than any of these threads realistically carries).
 const MAX_HUMAN_CHECK_PAGES = 5;
 
+// "Older than a day" threshold for the staleness/orphan checks below - a
+// separate concern from watcher.ts's own THREAD_CLOSE_DELAY_MS (which
+// happens to share the same value), not worth sharing between the two files.
+const STALE_AGE_MS = 24 * 60 * 60 * 1000;
+
+// isGameActivelyWatched() is wiped by a process restart (in-memory only) -
+// harmless for the existing rule-mismatch criteria below, since a channel's
+// settings changing is independent of restarts, but the staleness/orphan
+// criteria have no such incidental protection: a genuinely live game whose
+// thread happens to have no chat yet, hit right after a restart, would
+// otherwise look identical to an abandoned one. The game registry survives a
+// restart (PlayTak replays the whole active game list on reconnect - see
+// registry.ts), so checking it too closes that gap.
+function isGameStillLive(gameNo: number): boolean {
+  return isGameActivelyWatched(gameNo) || getGameRegistry().find(gameNo) !== undefined;
+}
+
 // `totalMessageSent` is the uncapped lifetime count; `messageCount` stops
 // incrementing past 50 and is only a fallback for a thread old enough that
 // Discord hasn't backfilled the newer field.
@@ -104,22 +125,34 @@ async function threadHasHumanMessages(thread: ThreadChannel): Promise<boolean> {
 }
 
 // This channel's own threads, active plus a bounded page of archived ones -
-// shared by the duplicates and threads subcommands.
-async function collectChannelThreads(channel: TextChannel): Promise<ThreadChannel[]> {
-  const candidates: ThreadChannel[] = [];
+// shared by all three subcommands. `complete` is false whenever a fetch
+// failed, or the archived list still had more pages past MAX_THREAD_PAGES -
+// the messages subcommand's orphaned-notice check (see pruneMessages())
+// needs to know this, since it reads "no thread found here" as "no thread
+// exists", which is only safe to conclude from a scan that covered
+// everything.
+async function collectChannelThreads(channel: TextChannel): Promise<{ threads: ThreadChannel[]; complete: boolean }> {
+  const threads: ThreadChannel[] = [];
+  let complete = true;
 
   const active = await channel.threads.fetchActive().catch(() => null);
-  if (active) candidates.push(...active.threads.values());
+  if (active) threads.push(...active.threads.values());
+  else complete = false;
 
   let before: ThreadChannel | undefined;
   for (let page = 0; page < MAX_THREAD_PAGES; page++) {
     const archived = await channel.threads.fetchArchived({ limit: THREAD_PAGE_SIZE, before }).catch(() => null);
-    if (!archived || archived.threads.size === 0) break;
-    candidates.push(...archived.threads.values());
+    if (!archived) {
+      complete = false;
+      break;
+    }
+    if (archived.threads.size === 0) break;
+    threads.push(...archived.threads.values());
     before = archived.threads.last();
     if (!archived.hasMore) break;
+    if (page === MAX_THREAD_PAGES - 1) complete = false;
   }
-  return candidates;
+  return { threads, complete };
 }
 
 // Shared scaffolding for all three subcommands: defers, posts a "still
@@ -162,12 +195,25 @@ async function runWithProgress(
 async function pruneMessages(interaction: ChatInputCommandInteraction, channel: TextChannel): Promise<void> {
   const channelId = channel.id;
   const botId = interaction.client.user?.id;
-  const stats = { scanned: 0, removed: 0 };
+  const stats = { scanned: 0, removed: 0, removedOrphaned: 0, orphanCheckSkipped: false };
 
   await runWithProgress(
     interaction,
     () => `Working on pruning messages... scanned ${stats.scanned}, removed ${stats.removed} so far.`,
     async () => {
+      // Which game numbers currently have a real thread somewhere in this
+      // channel - built once up front (same fixed cost /prune threads and
+      // /prune duplicates already pay) so the loop below can tell an
+      // orphaned notice (its thread is gone) from a live one.
+      const { threads: channelThreads, complete: threadScanComplete } = await collectChannelThreads(channel);
+      stats.orphanCheckSkipped = !threadScanComplete;
+      const threadGameNumbers = new Set<number>();
+      for (const thread of channelThreads) {
+        if (thread.ownerId !== botId) continue;
+        const parsed = parseThreadName(thread.name);
+        if (parsed) threadGameNumbers.add(parsed.gameNo);
+      }
+
       let beforeId: string | undefined;
 
       for (let page = 0; page < MAX_MESSAGE_PAGES; page++) {
@@ -191,25 +237,44 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
           const white = extractName(match[1]);
           const black = extractName(match[2]);
           if (white === undefined || black === undefined) continue;
+          const gameNo = Number(match[3]);
 
           // Still live - leave it for the game to finish naturally rather
           // than risk deleting something announcer.ts/seekToGame.ts track.
           if (isTrackedSeekMessage(channelId, message.id) || isTrackedGameMessage(message.id)) continue;
 
-          if (wouldGameNoticeBeAllowed(channelId, white, black)) continue;
+          const ruleMismatch = !wouldGameNoticeBeAllowed(channelId, white, black);
+          // A truncated thread scan can only be trusted to say "found" -
+          // never "not found", since the real thread could just be past the
+          // page cap - so this stays off for the whole run rather than risk
+          // destroying a notice's still-valid Review button on a guess.
+          const orphaned =
+            threadScanComplete &&
+            Date.now() - message.createdTimestamp > STALE_AGE_MS &&
+            !threadGameNumbers.has(gameNo) &&
+            !isGameStillLive(gameNo);
+
+          if (!ruleMismatch && !orphaned) continue;
 
           await message.delete().catch(() => {});
           stats.removed++;
+          if (orphaned) stats.removedOrphaned++;
         }
 
         beforeId = batch.last()?.id;
         if (batch.size < MESSAGE_PAGE_SIZE) break;
       }
 
+      const orphanLine = stats.orphanCheckSkipped
+        ? ' (Skipped checking for notices with a missing thread this run - this channel has more archived threads ' +
+          "than one pass covers, so a thread's absence couldn't be confirmed safely.)"
+        : stats.removedOrphaned > 0
+          ? ` ${stats.removedOrphaned} of those were game notices whose thread could no longer be found, over a day old.`
+          : '';
       return (
         `Scanned ${stats.scanned} message${stats.scanned === 1 ? '' : 's'}, removed ${stats.removed} that wouldn't ` +
         "be posted here now (game notices no longer matching this channel's rules, and old public /ping, /list, or " +
-        '/seeks replies).'
+        `/seeks replies).${orphanLine}`
       );
     },
   );
@@ -218,13 +283,13 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
 async function pruneThreads(interaction: ChatInputCommandInteraction, channel: TextChannel): Promise<void> {
   const channelId = channel.id;
   const botId = interaction.client.user?.id;
-  const stats = { scanned: 0, removed: 0, removedWithHumans: [] as string[] };
+  const stats = { scanned: 0, removed: 0, removedWithHumans: [] as string[], removedStale: 0 };
 
   await runWithProgress(
     interaction,
     () => `Working on pruning threads... scanned ${stats.scanned}, removed ${stats.removed} so far.`,
     async () => {
-      const candidates = await collectChannelThreads(channel);
+      const { threads: candidates } = await collectChannelThreads(channel);
 
       for (const thread of candidates) {
         stats.scanned++;
@@ -235,27 +300,50 @@ async function pruneThreads(interaction: ChatInputCommandInteraction, channel: T
 
         // Still being played/watched - never delete a live thread, even if
         // it no longer matches current rules.
-        if (isGameActivelyWatched(parsed.gameNo)) continue;
+        if (isGameStillLive(parsed.gameNo)) continue;
 
-        if (wouldGameNoticeBeAllowed(channelId, parsed.white, parsed.black)) continue;
+        const ruleMismatch = !wouldGameNoticeBeAllowed(channelId, parsed.white, parsed.black);
+        // "Older than a day" independent of whether the channel's rules
+        // still match - a thread nobody ever talked in is just noise once
+        // its game is old news, regardless of settings.
+        const oldEnough = Date.now() - (thread.createdTimestamp ?? Date.now()) > STALE_AGE_MS;
+
+        // Only worth a message-history fetch when it can change the
+        // outcome: the rule-mismatch path wants it purely to report human
+        // presence, and the staleness path needs it to fire at all.
+        let hadHumans: boolean | undefined;
+        if (ruleMismatch || oldEnough) hadHumans = await threadHasHumanMessages(thread);
+
+        const isStale = oldEnough && hadHumans === false;
+        if (!ruleMismatch && !isStale) continue;
 
         // Checked and reported, not skipped - unlike /prune duplicates,
         // running this subcommand is a deliberate "enforce current rules"
-        // action, so it still removes the thread; this just makes sure a
-        // human conversation that gets swept up isn't lost silently.
-        const hadHumans = await threadHasHumanMessages(thread);
+        // action, so a rule-mismatched thread with human chat still gets
+        // removed; this just makes sure that isn't lost silently. A stale
+        // thread, by definition, never has human messages, so there's
+        // nothing to report there beyond the count.
         await thread.delete().catch(() => {});
         stats.removed++;
-        if (hadHumans) stats.removedWithHumans.push(thread.name);
+        if (ruleMismatch) {
+          if (hadHumans) stats.removedWithHumans.push(thread.name);
+        } else {
+          stats.removedStale++;
+        }
       }
 
       const flagLine =
         stats.removedWithHumans.length > 0
           ? ` ${stats.removedWithHumans.length} of those had human messages in them: ${stats.removedWithHumans.join(', ')}.`
           : '';
+      const staleLine =
+        stats.removedStale > 0
+          ? ` Also removed ${stats.removedStale} more that had no human messages and were over a day old (regardless ` +
+            "of whether they'd currently match this channel's rules)."
+          : '';
       return (
         `Scanned ${stats.scanned} thread${stats.scanned === 1 ? '' : 's'}, removed ${stats.removed} that wouldn't ` +
-        `be shown here now (live games are never touched).${flagLine}`
+        `be shown here now (live games are never touched).${flagLine}${staleLine}`
       );
     },
   );
@@ -269,7 +357,7 @@ async function pruneDuplicates(interaction: ChatInputCommandInteraction, channel
     interaction,
     () => `Working on pruning duplicate threads... scanned ${stats.scanned}, removed ${stats.removed} so far.`,
     async () => {
-      const candidates = await collectChannelThreads(channel);
+      const { threads: candidates } = await collectChannelThreads(channel);
       stats.scanned = candidates.length;
 
       const byGameNo = new Map<number, ThreadChannel[]>();

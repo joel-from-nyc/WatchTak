@@ -18,7 +18,23 @@ export function renderBoardPng(
   const sink = new PassThrough();
   sink.on('data', () => {});
   const canvas = TPStoPNG(
-    { tps, komi, imageSize: 'sm', hl: lastPly, player1: white, player2: black },
+    {
+      tps,
+      komi,
+      hl: lastPly,
+      player1: white,
+      player2: black,
+      // Fixed per feedback from tps-ninja's own author on how the library is
+      // meant to be embedded in a Discord message. `font` assumes Source
+      // Code Pro is installed as a system font on the host running this bot
+      // (confirmed on the current Windows host) - would fall back silently
+      // to canvas's default font on a host without it, e.g. a future
+      // Linux/Docker deployment.
+      theme: 'discord',
+      transparent: true,
+      imageSize: 'md',
+      font: 'Source Code Pro',
+    },
     sink,
   );
   return canvas.toBuffer();

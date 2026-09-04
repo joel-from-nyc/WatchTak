@@ -31,9 +31,10 @@ const MOD_COMMANDS = [
   '**/prune duplicates** - Collapses duplicate watch threads for the same game down to one, keeping the live ' +
     'thread or whichever has more messages. Skips (and reports) any set where a human posted.',
   "**/prune threads** - Removes watch threads that no longer match this channel's current /announce/showbots/" +
-    'rating settings. Live games are never touched; removed threads with human messages are flagged.',
-  '**/prune messages** - Removes channel messages that no longer match current rules, plus old public /ping, ' +
-    '/list, or /seeks replies (now private-only).',
+    'rating settings, plus threads nobody ever chatted in that are over a day old. Live games are never touched; ' +
+    'removed threads with human messages are flagged.',
+  '**/prune messages** - Removes channel messages that no longer match current rules, game notices whose thread ' +
+    'is gone (over a day old), plus old public /ping, /list, or /seeks replies (now private-only).',
 ];
 
 // Discord rejects any single message body over 2000 characters. Each labeled

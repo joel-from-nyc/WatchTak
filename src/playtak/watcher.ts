@@ -493,20 +493,8 @@ async function scheduleClose(thread: ThreadChannel): Promise<void> {
   setTimeout(() => closeThread(thread), THREAD_CLOSE_DELAY_MS);
 }
 
-async function handleGameEnd(
-  playtak: PlaytakClient,
-  state: WatchState,
-  resultText: string,
-  result?: string,
-): Promise<void> {
-  const ptnLink = await buildPtnNinjaLink({
-    white: state.white,
-    black: state.black,
-    boardSize: state.boardSize,
-    komi: state.komi,
-    result,
-    plies: state.plies,
-  });
+async function handleGameEnd(playtak: PlaytakClient, state: WatchState, resultText: string): Promise<void> {
+  const ptnLink = buildPtnNinjaLink(state.gameNo);
   // No move landed to end the game this way (resignation, flag, abandonment)
   // - no increment was credited, so show the raw clock value.
   await resolveLowTimeWarning(state, false);
@@ -561,7 +549,7 @@ async function handleWatcherEvent(playtak: PlaytakClient, event: PlaytakEvent): 
   }
 
   if (event.type === 'gameOver') {
-    await handleGameEnd(playtak, state, describeResult(event.result, state.white, state.black), event.result);
+    await handleGameEnd(playtak, state, describeResult(event.result, state.white, state.black));
     return;
   }
   if (event.type === 'gameAbandoned') {
@@ -877,14 +865,7 @@ async function createReconstructedThread(parentChannel: TextChannel, gameNo: num
   }
   await postBoard(state, currentPositionText(state));
 
-  const ptnLink = await buildPtnNinjaLink({
-    white: archived.white,
-    black: archived.black,
-    boardSize: archived.boardSize,
-    komi: state.komi,
-    result: archived.result,
-    plies: archived.plies,
-  });
+  const ptnLink = buildPtnNinjaLink(gameNo);
   await thread.send(
     `${codeBlock(['Game Over', '', describeResult(archived.result, archived.white, archived.black)])}\n` +
       `[View full game on ptn.ninja](${ptnLink})`,

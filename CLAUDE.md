@@ -127,9 +127,12 @@ separate instance, not a second server on the same process):
   start (ids are issued at start, and `date` never runs out of order with
   them); no end timestamp is stored anywhere.
 - `src/playtak/ptn.ts`, `ptnLink.ts`, `result.ts`, `boardImage.ts` — PTN
-  notation conversion, `ptn.ninja` link building (with link shortening),
-  human-readable game results, and board-image rendering (via the
-  `tps-ninja` package, which depends on native `canvas` bindings).
+  notation conversion, `ptn.ninja` link building (a direct
+  `playtak.com/games/<id>/ninjaviewer` link, which PlayTak's own server
+  redirects into ptn.ninja preloaded with that game's real PTN - no local
+  PTN-document building or link-shortening service needed), human-readable
+  game results, and board-image rendering (via the `tps-ninja` package,
+  which depends on native `canvas` bindings).
 - `src/scripts/` — standalone probe scripts used to explore PlayTak's wire
   protocol against live traffic. Not wired into the bot; kept around as
   debugging tools.

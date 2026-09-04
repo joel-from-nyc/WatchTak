@@ -22,6 +22,17 @@ declare module 'tps-ninja' {
     // Shown next to the flat count on each side of the board header.
     player1?: string;
     player2?: string;
+    // Built-in theme id from tps-ninja's own themes.js - 'discord' is a
+    // theme the library ships specifically to blend into Discord's UI.
+    theme?: string;
+    // Renders on a transparent background (zeroes tps-ninja's own bgAlpha)
+    // instead of painting the theme's background color, so the board blends
+    // into whichever side of a viewer's light/dark toggle they're on.
+    transparent?: boolean;
+    // Canvas font-family string, trusted as-is - tps-ninja has no font
+    // bundling/registration mechanism, so this only renders as intended on a
+    // host that already has the named font installed.
+    font?: string;
   }
 
   export interface TakCanvas {
