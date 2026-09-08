@@ -364,14 +364,7 @@ async function expandNew(interaction: ChatInputCommandInteraction, thread: AnyTh
         );
       }
     } else {
-      const ptnLink = await buildPtnNinjaLink({
-        white,
-        black,
-        boardSize,
-        komi,
-        result: record.result,
-        plies: record.plies,
-      });
+      const ptnLink = buildPtnNinjaLink(gameNo);
       await replayThread.send(
         `${codeBlock(['Game Over', '', describeResult(record.result ?? '', white, black)])}\n` +
           `[View full game on ptn.ninja](${ptnLink})`,
