@@ -1,10 +1,12 @@
 import fs from 'fs';
 import path from 'path';
 
-// A /rating override for one channel: always show a game between a human at
-// least `humanMin` and a bot at least `botMin`, regardless of what /announce
-// or /showbots would otherwise say - see announcer.ts's ratingOverrideMatches().
-// Either bound can be omitted to mean "no minimum" on that side.
+// A /rating rule for one channel: when set, game notices there only show a
+// registered human rated at least `humanMin` playing another human, or a bot
+// rated at least `botMin` - hiding everything else, regardless of what
+// /announce or /showbots would otherwise say - see announcer.ts's
+// ratingRuleAllows(). Either bound can be omitted to mean "no minimum" on
+// that side.
 export interface RatingRule {
   humanMin?: number;
   botMin?: number;

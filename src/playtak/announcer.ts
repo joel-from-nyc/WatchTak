@@ -116,26 +116,34 @@ function isBotVsBot(game: NamedGame, seek: Seek | undefined): boolean {
   return isConfirmedBot(game.white, seek) && isConfirmedBot(game.black, seek);
 }
 
-// Whether `game` matches a channel's /rating override - a human at least
-// `rule.humanMin` playing a bot at least `rule.botMin` (either bound omitted
-// means no minimum on that side). Checks both ways round, since `game.white`/
-// `game.black` don't say which one is meant to be the "human" side. A match
-// here forces the game to be shown regardless of `mode`/`showBots` - see
-// modeAllowsGame().
-function ratingOverrideMatches(rule: RatingRule | undefined, game: NamedGame, seek: Seek | undefined): boolean {
-  if (!rule) return false;
-
-  for (const [human, bot] of [
+// Whether `game` passes a channel's /rating rule - the authoritative filter
+// for game notices wherever one is set (see modeAllowsGame()). A game passes
+// when at least one side is a registered human meeting `rule.humanMin` whose
+// opponent is either another human (any rating, guests included) or a bot
+// meeting `rule.botMin`; everything else - including a game with no
+// qualifying human at all - is hidden. Either bound omitted means no minimum
+// on that side. Checks both ways round, since `game.white`/`game.black`
+// don't say which one is meant to be the "human" side. A bound can only be
+// met by a *known* rating, so unknown ratings (unrated players, and the
+// window right after a restart before ratings.ts's first fetch lands) fail
+// it rather than pass - the gate errs toward hiding, since its whole point
+// is cutting noise.
+function ratingRuleAllows(rule: RatingRule, game: NamedGame, seek: Seek | undefined): boolean {
+  for (const [human, opponent] of [
     [game.white, game.black],
     [game.black, game.white],
   ]) {
-    // isLoggedInUser() already excludes bots as well as guests.
-    if (!isLoggedInUser(human, seek) || !isConfirmedBot(bot, seek)) continue;
-    const humanRating = getRating(human);
-    const botRating = getRating(bot);
-    if (humanRating === undefined || botRating === undefined) continue;
-    if (rule.humanMin !== undefined && humanRating < rule.humanMin) continue;
-    if (rule.botMin !== undefined && botRating < rule.botMin) continue;
+    // The qualifying side must be a registered human - isLoggedInUser()
+    // already excludes bots as well as guests.
+    if (!isLoggedInUser(human, seek)) continue;
+    if (rule.humanMin !== undefined) {
+      const humanRating = getRating(human);
+      if (humanRating === undefined || humanRating < rule.humanMin) continue;
+    }
+    if (isConfirmedBot(opponent, seek) && rule.botMin !== undefined) {
+      const botRating = getRating(opponent);
+      if (botRating === undefined || botRating < rule.botMin) continue;
+    }
     return true;
   }
   return false;
@@ -146,13 +154,18 @@ function ratingOverrideMatches(rule: RatingRule | undefined, game: NamedGame, se
 // seekToGame.ts) - it's the only source of bot-status the protocol offers,
 // and only for whichever side created the seek. `showBots` is this channel's
 // /showbots setting - when off, any game with a confirmed bot on either side
-// is excluded outright, on top of whatever `mode` would otherwise allow -
-// unless `ratingRule` overrides that (see ratingOverrideMatches()).
+// is excluded outright, on top of whatever `mode` would otherwise allow.
 //
-// `quiet` is checked before the rating override deliberately: that mode means
+// A /rating rule, where one is set, is the authoritative filter instead: it
+// both forces qualifying games through (a strong human playing a strong bot
+// shows even with showbots off) and hides everything that misses it, which
+// makes `showBots` and the `noguest`/`users` modes moot in that channel -
+// the rule's own bounds are stricter than any of them (see
+// ratingRuleAllows()).
+//
+// `quiet` is checked before the rating rule deliberately: that mode means
 // "no game-started notices at all here", so it stays truly quiet rather than
-// being punched through by an override. Every other filter - showbots,
-// noguest, users - does yield to a matching override.
+// being punched through by the rule.
 function modeAllowsGame(
   mode: AnnounceMode,
   game: NamedGame,
@@ -162,7 +175,7 @@ function modeAllowsGame(
 ): boolean {
   if (isBotVsBot(game, seek)) return false;
   if (mode === 'quiet') return false;
-  if (ratingOverrideMatches(ratingRule, game, seek)) return true;
+  if (ratingRule) return ratingRuleAllows(ratingRule, game, seek);
   if (!showBots && (isConfirmedBot(game.white, seek) || isConfirmedBot(game.black, seek))) return false;
   switch (mode) {
     case 'on':

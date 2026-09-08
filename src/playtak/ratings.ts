@@ -1,5 +1,5 @@
 // Caches player ratings from PlayTak's own ratings page data, for /rating's
-// threshold overrides (see ratingStore.ts and announcer.ts). The WebSocket
+// threshold rules (see ratingStore.ts and announcer.ts). The WebSocket
 // protocol carries no rating information at all, but the ratings page at
 // https://playtak.com/ratings.html loads its table from this JSON endpoint -
 // confirmed by reading that page's own js/ratinglist.js, not guessed.
@@ -10,7 +10,7 @@ const RATINGLIST_URL = 'https://playtak.com/ratinglist.json';
 // Ratings don't move fast enough to need more - one fetch of this small file
 // per interval is far gentler on PlayTak's server than looking up players
 // individually, and this is the same interval whether one channel or ten
-// have a /rating override active.
+// have a /rating rule active.
 const REFRESH_INTERVAL_MS = 20 * 60 * 1000;
 
 // One row of https://playtak.com/ratinglist.json: [name(s), rating,
@@ -33,12 +33,11 @@ const ratingsByName = new Map<string, RatingEntry>();
 // started. `ratingsByName` starts empty and startRatingsRefresh()'s first
 // fetch is fire-and-forget - nothing awaits it - so there's a real window
 // right after every restart where getRating() returns undefined for every
-// player. During that window a configured /rating override can't match
-// anything (ratingOverrideMatches() in announcer.ts requires both ratings to
-// be known), silently acting as if it were never set. That's tolerable for
-// live announcing (worst case: a notice is briefly missed, self-corrects on
-// the next event) but not for /prune, which deletes - see
-// prune.ts's areRatingsLoaded() check before it runs.
+// player. During that window a configured /rating rule hides every game it
+// gates (ratingRuleAllows() in announcer.ts fails a bound whose rating is
+// unknown). That's tolerable for live announcing (worst case: a notice is
+// briefly missed, self-corrects on the next event) but not for /prune,
+// which deletes - see prune.ts's areRatingsLoaded() check before it runs.
 let loadedOnce = false;
 
 async function refreshRatings(): Promise<void> {
@@ -62,7 +61,7 @@ async function refreshRatings(): Promise<void> {
     loadedOnce = true;
   } catch (err) {
     // Keep serving whatever was cached from the last successful fetch rather
-    // than letting a transient failure blank out every /rating override.
+    // than letting a transient failure blank out every /rating rule.
     console.error('Failed to refresh PlayTak ratings:', err);
   }
 }

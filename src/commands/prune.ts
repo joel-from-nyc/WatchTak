@@ -414,17 +414,18 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   }
 
   // Every subcommand's "would this still be shown?" check (wouldGameNoticeBeAllowed())
-  // depends on PlayTak's ratings list to evaluate a /rating override - and
-  // that list is empty until its first fetch completes after a restart (see
+  // depends on PlayTak's ratings list to evaluate a /rating rule - and that
+  // list is empty until its first fetch completes after a restart (see
   // ratings.ts's areRatingsLoaded()). Running /prune in that window would
-  // silently treat every /rating override as unset, deleting things it
-  // should have protected - refusing outright is safer than a wrong answer,
-  // since deletion isn't reversible.
+  // evaluate the rule with every rating unknown, which hides everything the
+  // rule gates - deleting notices and threads that are actually still valid.
+  // Refusing outright is safer than a wrong answer, since deletion isn't
+  // reversible.
   if (!areRatingsLoaded()) {
     await interaction.reply({
       content:
-        "PlayTak's rating list hasn't finished loading since the bot last restarted, so /rating overrides can't be " +
-        'checked yet - running /prune right now could delete things a rating override should protect. Wait a ' +
+        "PlayTak's rating list hasn't finished loading since the bot last restarted, so /rating rules can't be " +
+        'checked yet - running /prune right now could delete things a rating rule should protect. Wait a ' +
         'minute or two and try again.',
       ephemeral: true,
     });

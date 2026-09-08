@@ -26,8 +26,9 @@ const MOD_COMMANDS = [
     'players and watchable games. `quiet` - only new seeks are displayed. `noguest` - only shows live games without ' +
     'guests. `users` - only shows games with at least one registered PlayTak user.',
   '**/showbots <on|off>** - Show or hide bot games in announcements here (default on). No argument checks status.',
-  '**/rating [human] [bot] [off]** - Always announce/watch games between a human and a bot meeting these minimum ' +
-    'ratings, overriding other filters. No argument checks status; `off` clears it.',
+  '**/rating [human] [bot] [off]** - Only announce games featuring a human rated at least `human` - versus ' +
+    'another human, or versus a bot rated at least `bot`. Everything else is hidden, overriding /showbots and ' +
+    'the /announce mode (quiet still wins). No argument checks status; `off` clears it.',
   '**/prune duplicates** - Collapses duplicate watch threads for the same game down to one, keeping the live ' +
     'thread or whichever has more messages. Skips (and reports) any set where a human posted.',
   "**/prune threads** - Removes watch threads that no longer match this channel's current /announce/showbots/" +

@@ -56,11 +56,17 @@ separate instance, not a second server on the same process):
   off, any game with a confirmed bot on either side is dropped from
   game-started notices. Bot *seeks* were already never announced, so
   this only affects game notices.
-- `/rating human:<n> bot:<n>` — a standing per-channel override
-  (`ratingStore.ts`): a human rated at least `human` playing a bot rated
-  at least `bot` is always shown, beating `/showbots`, `noguest`, and
-  `users`. It deliberately does *not* beat `quiet`, which means "no game
-  notices here at all". `/rating off` clears it.
+- `/rating human:<n> bot:<n>` — a standing per-channel filter
+  (`ratingStore.ts`): when set, it's the authoritative gate for game
+  notices — only games featuring a registered human rated at least
+  `human` versus another human (any rating) or versus a bot rated at
+  least `bot` are shown; everything else is hidden. That both beats
+  `/showbots` (a qualifying bot game shows even with it off) and makes
+  `/showbots`, `noguest`, and `users` moot in that channel. It
+  deliberately does *not* beat `quiet`, which means "no game notices here
+  at all". Unknown ratings fail the bounds (hide), including the
+  first-minute window after a restart before the ratings list loads.
+  `/rating off` clears it.
 - `/help` — full explanation of every command and its aliases (Discord
   caps a command's own description at 100 characters, so this is the
   fuller version). Keep the per-command lines here terse.
