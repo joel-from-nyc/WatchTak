@@ -31,9 +31,11 @@ separate instance, not a second server on the same process):
   of drawing wrong boards). `new` builds a separate "Replay: ... - game N"
   thread with one message+board per ply, then attaches it as a live mirror
   of the watch so both threads get subsequent moves (mirror is in-memory
-  only: a restart orphans the replay thread and Discord's 24h auto-archive
-  retires it; its name deliberately doesn't match the watcher's `(#N)`
-  thread-name pattern so the sweep never adopts it). Games over 150 plies
+  only: a restart orphans the replay thread; its name deliberately doesn't
+  match the watcher's `(#N)` thread-name pattern so the sweep never adopts
+  it, and the pruners remove it once it's a day old with no human chat,
+  like any other thread - `catchup.ts` owns the name format so both sides
+  agree on it). Games over 150 plies
   refuse `new` — the ptn.ninja link covers those. Reconnect gaps of ≤10
   plies never produce summaries at all: the watcher just draws each missed
   move inline, since that costs the same number of messages.
@@ -72,7 +74,8 @@ separate instance, not a second server on the same process):
   threads for the same game down to one, skipping (and reporting) any set
   with human chat in it. `threads` removes watch threads that no longer
   match the channel's current `/announce`/`/showbots`/`/rating` settings,
-  plus any over a day old that nobody ever chatted in. `messages` removes
+  plus any over a day old that nobody ever chatted in (`/expand new`
+  replay threads included). `messages` removes
   channel messages that no longer match those settings, plus game notices
   and Discord's own "started a thread" lines whose thread is gone (also a
   day old). Live games are never touched.
@@ -95,7 +98,10 @@ separate instance, not a second server on the same process):
   Discord's "started a thread" system line — whose message id *is* the
   thread's id, and which Discord does not remove when the thread is
   deleted — is removed along with any thread the pruners delete, and
-  cleaned up on its own whenever its thread is found to be gone.
+  cleaned up on its own whenever its thread is found to be gone. Replay
+  threads (`/expand new`), which have no notice of their own, get the same
+  game-over/day-old/no-chat rule applied directly, since a restart severs
+  the watcher's link to one and nothing else would ever close it.
 - `/help` — full explanation of every command and its aliases (Discord
   caps a command's own description at 100 characters, so this is the
   fuller version). Keep the per-command lines here terse.

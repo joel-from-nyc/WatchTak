@@ -11,6 +11,7 @@ import {
   isGameStillLive,
   collectChannelThreads,
   mapThreadsByGameNo,
+  listReplayThreads,
   threadHasHumanMessages,
   MAX_MESSAGE_PAGES,
   MESSAGE_PAGE_SIZE,
@@ -133,6 +134,16 @@ async function autoPruneChannel(discordClient: Client, channelId: string): Promi
 
     beforeId = batch.last()?.id;
     if (batch.size < MESSAGE_PAGE_SIZE) break;
+  }
+
+  // Replay threads (/expand new) have no notice pointing at them, so the
+  // scan above never reaches one - same rules, applied directly: game over,
+  // a day old, and nobody ever chatted in it.
+  for (const { thread, gameNo } of listReplayThreads(threads, botId)) {
+    if (isGameStillLive(gameNo)) continue;
+    if (Date.now() - (thread.createdTimestamp ?? Date.now()) <= STALE_AGE_MS) continue;
+    if ((await hasHumanMessages(thread)) !== false) continue;
+    await deleteThread(thread);
   }
 }
 

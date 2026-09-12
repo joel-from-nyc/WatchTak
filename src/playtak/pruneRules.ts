@@ -1,5 +1,6 @@
 import { TextChannel, ThreadChannel, Message, MessageType, ComponentType } from 'discord.js';
 import { isGameActivelyWatched, parseThreadName } from './watcher';
+import { parseReplayThreadName } from './catchup';
 import { getGameRegistry } from './shared';
 
 // Staleness/scanning primitives shared by the manual /prune command
@@ -179,10 +180,12 @@ export async function collectChannelThreads(channel: TextChannel): Promise<{ thr
   return { threads, complete };
 }
 
-// This bot's own game threads out of `threads`, keyed by PlayTak game number
-// - shared by every caller that needs to answer "does a real thread exist
-// for this notice's game" (and, for autoPrune.ts, get the thread itself back
-// to inspect/delete).
+// This bot's own *watch* threads out of `threads`, keyed by PlayTak game
+// number - shared by every caller that needs to answer "does a real thread
+// exist for this notice's game" (and, for autoPrune.ts, get the thread
+// itself back to inspect/delete). Replay threads never match here (their
+// names deliberately fail parseThreadName()) - a game's notice points at its
+// watch thread, never its replay; see listReplayThreads() for those.
 export function mapThreadsByGameNo(threads: ThreadChannel[], botId: string | undefined): Map<number, ThreadChannel> {
   const byGameNo = new Map<number, ThreadChannel>();
   for (const thread of threads) {
@@ -191,4 +194,22 @@ export function mapThreadsByGameNo(threads: ThreadChannel[], botId: string | und
     if (parsed) byGameNo.set(parsed.gameNo, thread);
   }
   return byGameNo;
+}
+
+// This bot's /expand new replay threads out of `threads`. A replay thread
+// has no notice of its own, so the notice-driven scans never reach one - it
+// needs its own pass. The watcher closes a replay that's still attached as
+// a live mirror when its game ends, but a restart severs that link, after
+// which nothing else would ever clean it up.
+export function listReplayThreads(
+  threads: ThreadChannel[],
+  botId: string | undefined,
+): { thread: ThreadChannel; gameNo: number }[] {
+  const replays: { thread: ThreadChannel; gameNo: number }[] = [];
+  for (const thread of threads) {
+    if (thread.ownerId !== botId) continue;
+    const parsed = parseReplayThreadName(thread.name);
+    if (parsed) replays.push({ thread, gameNo: parsed.gameNo });
+  }
+  return replays;
 }
