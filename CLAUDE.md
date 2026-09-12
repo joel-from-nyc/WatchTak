@@ -115,6 +115,12 @@ separate instance, not a second server on the same process):
 - `/help` — full explanation of every command and its aliases (Discord
   caps a command's own description at 100 characters, so this is the
   fuller version). Keep the per-command lines here terse.
+- The bot's Discord presence shows the live PlayTak game count
+  ("Watching 4 games on PlayTak" — `playtak/presence.ts`), read from the
+  same registry that backs `/list`. Refreshed on a timer, not per
+  GameList event: games start and end constantly and every reconnect
+  replays the whole list, which would blow past the gateway's presence
+  rate limit.
 
 ## Architecture
 - `src/playtak/client.ts` — the single guest WebSocket connection to
@@ -166,7 +172,14 @@ separate instance, not a second server on the same process):
   age threshold, "does a real thread exist for this notice's game", "has a
   human ever posted in this thread") shared by the manual `/prune` command
   and the silent automatic sweep below, so the two don't each reimplement
-  the same paginated Discord API scanning.
+  the same paginated Discord API scanning. Deletions go through
+  `deleteMessages()`, which batches up to 100 at a time via `bulkDelete`
+  — individual deletion is throttled hard enough to have once left a
+  `/prune` run looking hung for minutes. Two cases still fall back to one
+  at a time, silently: a message over two weeks old (Discord refuses to
+  bulk-delete those at all) and a channel where the bot lacks Manage
+  Messages (which bulk deletion requires, but deleting one's own messages
+  does not).
 - `src/playtak/autoPrune.ts` — the automatic counterpart to `/prune`
   described above: runs on its own timer, scoped to every channel with
   `/announce` ever configured (read from `announceStore.ts`), entirely

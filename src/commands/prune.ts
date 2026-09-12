@@ -17,6 +17,7 @@ import {
   parseNotice,
   isThreadStarterMessage,
   deleteThread,
+  deleteMessages,
   STALE_AGE_MS,
   isGameStillLive,
   collectChannelThreads,
@@ -90,18 +91,6 @@ function threadMessageCount(thread: ThreadChannel): number {
   return thread.totalMessageSent ?? thread.messageCount ?? 0;
 }
 
-// Whether the delete actually went through. Every deletion here is
-// best-effort (a missing permission or a vanished target just fails
-// quietly), so the counts in each summary only include the ones that
-// really happened - a "removed 40" that silently includes failures would
-// report a cleanup that didn't take place.
-async function tryDelete(target: { delete(): Promise<unknown> }): Promise<boolean> {
-  return target
-    .delete()
-    .then(() => true)
-    .catch(() => false);
-}
-
 // Shared scaffolding for all three subcommands: defers ephemerally (so the
 // progress heartbeat and final summary are visible only to whoever ran the
 // command, not the whole channel), posts a "still working" heartbeat every
@@ -170,11 +159,21 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
         if (!batch || batch.size === 0) break;
         stats.scanned += batch.size;
 
+        // Collected per page and deleted together at the end of it, so the
+        // whole page costs one bulk-delete call instead of one call per
+        // message (see deleteMessages()). Per page rather than per run so
+        // the progress heartbeat keeps moving and nothing is held in memory
+        // longer than it needs to be. `orphanedIds` is only for the summary
+        // breakdown, so it tracks candidates and is intersected with what
+        // actually got deleted.
+        const doomed: Message[] = [];
+        const orphanedIds = new Set<string>();
+
         for (const message of batch.values()) {
           if (message.author.id !== botId) continue;
 
           if (isStaleEphemeralReply(message)) {
-            if (await tryDelete(message)) stats.removed++;
+            doomed.push(message);
             continue;
           }
 
@@ -191,9 +190,9 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
               threadScanComplete &&
               Date.now() - message.createdTimestamp > STALE_AGE_MS &&
               !threadIds.has(linkedThreadId);
-            if (orphanedLink && (await tryDelete(message))) {
-              stats.removed++;
-              stats.removedOrphaned++;
+            if (orphanedLink) {
+              doomed.push(message);
+              orphanedIds.add(message.id);
             }
             continue;
           }
@@ -207,7 +206,7 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
           // above - can't be caught out by the race.
           if (commandName === 'announce') {
             const outdated = message.id !== trackedConfirmationId && Date.now() - message.createdTimestamp > STALE_AGE_MS;
-            if (outdated && (await tryDelete(message))) stats.removed++;
+            if (outdated) doomed.push(message);
             continue;
           }
 
@@ -219,9 +218,9 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
           if (isThreadStarterMessage(message, botId)) {
             const orphanedStarter =
               threadScanComplete && Date.now() - message.createdTimestamp > STALE_AGE_MS && !threadIds.has(message.id);
-            if (orphanedStarter && (await tryDelete(message))) {
-              stats.removed++;
-              stats.removedOrphaned++;
+            if (orphanedStarter) {
+              doomed.push(message);
+              orphanedIds.add(message.id);
             }
             continue;
           }
@@ -247,12 +246,19 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
 
           if (!ruleMismatch && !orphaned) continue;
 
-          if (!(await tryDelete(message))) continue;
-          stats.removed++;
-          if (orphaned) stats.removedOrphaned++;
+          doomed.push(message);
+          if (orphaned) orphanedIds.add(message.id);
         }
 
+        // `beforeId` is read from the page before anything in it is deleted:
+        // paging is keyed off message ids, and a deleted message is still a
+        // perfectly good "fetch everything before this" marker.
         beforeId = batch.last()?.id;
+
+        const deletedIds = await deleteMessages(channel, doomed);
+        stats.removed += deletedIds.length;
+        stats.removedOrphaned += deletedIds.filter((id) => orphanedIds.has(id)).length;
+
         if (batch.size < MESSAGE_PAGE_SIZE) break;
       }
 
