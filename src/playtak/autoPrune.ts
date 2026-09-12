@@ -1,4 +1,4 @@
-import { Client, ThreadChannel } from 'discord.js';
+import { Client, ThreadChannel, Message, DiscordAPIError, RESTJSONErrorCodes } from 'discord.js';
 import { PlaytakClient } from './client';
 import { loadAnnounceState } from './announceStore';
 import { fetchTextChannel, isTrackedSeekMessage } from './announcer';
@@ -11,6 +11,7 @@ import {
   isGameStillLive,
   collectChannelThreads,
   mapThreadsByGameNo,
+  listReplayThreads,
   threadHasHumanMessages,
   MAX_MESSAGE_PAGES,
   MESSAGE_PAGE_SIZE,
@@ -43,6 +44,16 @@ async function hasHumanMessages(thread: ThreadChannel): Promise<boolean | undefi
   const found = await threadHasHumanMessages(thread);
   if (found) threadsWithHumans.add(thread.id);
   return found;
+}
+
+// A message that's already gone by the time this gets to it - someone ran
+// /prune messages at the same moment, or deleted it by hand - is the
+// outcome this wanted anyway, not a failure worth logging.
+async function deleteQuietly(message: Message, what: string): Promise<void> {
+  await message.delete().catch((err) => {
+    if (err instanceof DiscordAPIError && err.code === RESTJSONErrorCodes.UnknownMessage) return;
+    console.error(`Auto-prune: failed to delete ${what} in channel ${message.channelId}:`, err);
+  });
 }
 
 // Implements exactly what a channel moderator asked for: a day after a
@@ -82,11 +93,7 @@ async function autoPruneChannel(discordClient: Client, channelId: string): Promi
       // deleted (by /prune, or by an earlier pass here before that cleanup
       // was part of deleting a thread) - nothing left for it to point at.
       if (isThreadStarterMessage(message, botId)) {
-        if (!threadIds.has(message.id)) {
-          await message.delete().catch((err) => {
-            console.error(`Auto-prune: failed to delete orphaned thread-starter line in channel ${channelId}:`, err);
-          });
-        }
+        if (!threadIds.has(message.id)) await deleteQuietly(message, 'orphaned thread-starter line');
         continue;
       }
 
@@ -101,9 +108,7 @@ async function autoPruneChannel(discordClient: Client, channelId: string): Promi
 
       const thread = threadsByGameNo.get(notice.gameNo);
       if (!thread) {
-        await message.delete().catch((err) => {
-          console.error(`Auto-prune: failed to delete orphaned notice in channel ${channelId}:`, err);
-        });
+        await deleteQuietly(message, 'orphaned notice');
         continue;
       }
 
@@ -124,13 +129,21 @@ async function autoPruneChannel(discordClient: Client, channelId: string): Promi
       // the thread would be left with nothing pointing at it, and nothing
       // to ever clean it up by either, since this scan is keyed off notices.
       if (!(await deleteThread(thread))) continue;
-      await message.delete().catch((err) => {
-        console.error(`Auto-prune: failed to delete notice for game #${notice.gameNo} in channel ${channelId}:`, err);
-      });
+      await deleteQuietly(message, `notice for game #${notice.gameNo}`);
     }
 
     beforeId = batch.last()?.id;
     if (batch.size < MESSAGE_PAGE_SIZE) break;
+  }
+
+  // Replay threads (/expand new) have no notice pointing at them, so the
+  // scan above never reaches one - same rules, applied directly: game over,
+  // a day old, and nobody ever chatted in it.
+  for (const { thread, gameNo } of listReplayThreads(threads, botId)) {
+    if (isGameStillLive(gameNo)) continue;
+    if (Date.now() - (thread.createdTimestamp ?? Date.now()) <= STALE_AGE_MS) continue;
+    if ((await hasHumanMessages(thread)) !== false) continue;
+    await deleteThread(thread);
   }
 }
 

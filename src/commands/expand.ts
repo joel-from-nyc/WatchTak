@@ -19,6 +19,8 @@ import {
   expectedChunkMoveList,
   moveOnlyText,
   STALE_CHUNK_NOTE,
+  replayThreadName,
+  parseReplayThreadName,
 } from '../playtak/catchup';
 import { codeBlock } from '../playtak/format';
 import { describeResult } from '../playtak/result';
@@ -46,16 +48,6 @@ const MAX_CHUNK_SCAN_PAGES = 20;
 // way to read a game anyway; the ptn.ninja link posted at game end does
 // long-game replay strictly better.
 const REPLAY_MAX_PLIES = 150;
-
-// Replay thread names deliberately do NOT match the watcher's
-// THREAD_NAME_PATTERN (they end in bare digits, never "(#123)"), so the
-// sweep never mistakes one for a watch thread and /expand refuses to run
-// inside one (parseThreadName() fails on it).
-const REPLAY_THREAD_PATTERN = /^Replay: .+ vs .+ - game (\d+)$/;
-
-function replayThreadName(white: string, black: string, gameNo: number): string {
-  return `Replay: ${white} vs ${black} - game ${gameNo}`;
-}
 
 // The authoritative record of a game's moves, wherever it currently lives:
 // the in-memory watch state for a live watched game, or PlayTak's archive
@@ -280,8 +272,7 @@ async function expandNew(interaction: ChatInputCommandInteraction, thread: AnyTh
   const active = await parent.threads.fetchActive().catch(() => null);
   for (const existing of active?.threads.values() ?? []) {
     if (existing.ownerId !== botId) continue;
-    const match = REPLAY_THREAD_PATTERN.exec(existing.name);
-    if (match && Number(match[1]) === gameNo) {
+    if (parseReplayThreadName(existing.name)?.gameNo === gameNo) {
       await fail(`This game already has a replay thread: ${existing}`);
       return;
     }

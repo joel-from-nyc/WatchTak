@@ -36,6 +36,25 @@ export const CHUNK_HINT = 'Run /expand here to draw these boards, or /expand new
 // skip it instead of re-checking forever.
 export const STALE_CHUNK_NOTE = "These moves were rewritten by a takeback - boards can't be drawn.";
 
+// Naming for the replay threads /expand new builds. Deliberately does NOT
+// match the watcher's THREAD_NAME_PATTERN (it ends in bare digits, never
+// "(#123)"), so the watcher's sweep never mistakes a replay for a watch
+// thread and /expand refuses to run inside one (parseThreadName() fails on
+// it). Shared here so the pruners (pruneRules.ts) can recognize one from its
+// name too - otherwise a replay thread orphaned by a restart is never
+// cleaned up by anything.
+const REPLAY_THREAD_PATTERN = /^Replay: (.+) vs (.+) - game (\d+)$/;
+
+export function replayThreadName(white: string, black: string, gameNo: number): string {
+  return `Replay: ${white} vs ${black} - game ${gameNo}`;
+}
+
+export function parseReplayThreadName(name: string): { white: string; black: string; gameNo: number } | undefined {
+  const match = REPLAY_THREAD_PATTERN.exec(name);
+  if (!match) return undefined;
+  return { white: match[1], black: match[2], gameNo: Number(match[3]) };
+}
+
 // Every "Label: value" line in a thread pads its label to the same width, so
 // the colon column lines up down the whole message history. The labels
 // themselves ("Move", "White Time", "Black Time") are fixed, so this is a

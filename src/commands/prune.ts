@@ -10,6 +10,7 @@ import { wouldGameNoticeBeAllowed, isTrackedSeekMessage } from '../playtak/annou
 import { isTrackedGameMessage } from '../playtak/seekToGame';
 import { isGameActivelyWatched, getWatchedThread, parseThreadName } from '../playtak/watcher';
 import { areRatingsLoaded } from '../playtak/ratings';
+import { parseReplayThreadName } from '../playtak/catchup';
 import {
   parseNotice,
   isThreadStarterMessage,
@@ -231,7 +232,10 @@ async function pruneThreads(interaction: ChatInputCommandInteraction, channel: T
         stats.scanned++;
         if (thread.ownerId !== botId) continue;
 
-        const parsed = parseThreadName(thread.name);
+        // Watch threads and /expand new replay threads alike - a replay
+        // carries the same players and game number in its name, just in a
+        // shape the watcher's sweep deliberately doesn't recognize.
+        const parsed = parseThreadName(thread.name) ?? parseReplayThreadName(thread.name);
         if (!parsed) continue;
 
         // Still being played/watched - never delete a live thread, even if
