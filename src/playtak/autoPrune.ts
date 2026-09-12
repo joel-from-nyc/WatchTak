@@ -4,7 +4,9 @@ import { loadAnnounceState } from './announceStore';
 import { fetchTextChannel, isTrackedSeekMessage } from './announcer';
 import { isTrackedGameMessage } from './seekToGame';
 import {
-  parseNoticeLine,
+  parseNotice,
+  isThreadStarterMessage,
+  deleteThread,
   STALE_AGE_MS,
   isGameStillLive,
   collectChannelThreads,
@@ -65,6 +67,7 @@ async function autoPruneChannel(discordClient: Client, channelId: string): Promi
   // than risk deleting a notice whose thread genuinely still exists.
   if (!complete) return;
   const threadsByGameNo = mapThreadsByGameNo(threads, botId);
+  const threadIds = new Set(threads.map((thread) => thread.id));
 
   let beforeId: string | undefined;
   for (let page = 0; page < MAX_MESSAGE_PAGES; page++) {
@@ -75,7 +78,19 @@ async function autoPruneChannel(discordClient: Client, channelId: string): Promi
       if (message.author.id !== botId) continue;
       if (Date.now() - message.createdTimestamp <= STALE_AGE_MS) continue;
 
-      const notice = parseNoticeLine(message.content.split('\n', 1)[0]);
+      // Discord's "started a thread" line for a thread that's since been
+      // deleted (by /prune, or by an earlier pass here before that cleanup
+      // was part of deleting a thread) - nothing left for it to point at.
+      if (isThreadStarterMessage(message, botId)) {
+        if (!threadIds.has(message.id)) {
+          await message.delete().catch((err) => {
+            console.error(`Auto-prune: failed to delete orphaned thread-starter line in channel ${channelId}:`, err);
+          });
+        }
+        continue;
+      }
+
+      const notice = parseNotice(message);
       if (!notice) continue;
 
       // Still mid-transition (seekToGame.ts/announcer.ts still hold a live
@@ -105,17 +120,10 @@ async function autoPruneChannel(discordClient: Client, channelId: string): Promi
       // alone, permanently.
       if ((await hasHumanMessages(thread)) !== false) continue;
 
-      const threadDeleted = await thread
-        .delete()
-        .then(() => true)
-        .catch((err) => {
-          console.error(`Auto-prune: failed to delete stale thread for game #${notice.gameNo} in channel ${channelId}:`, err);
-          return false;
-        });
       // The notice only goes once its thread is actually gone - otherwise
       // the thread would be left with nothing pointing at it, and nothing
       // to ever clean it up by either, since this scan is keyed off notices.
-      if (!threadDeleted) continue;
+      if (!(await deleteThread(thread))) continue;
       await message.delete().catch((err) => {
         console.error(`Auto-prune: failed to delete notice for game #${notice.gameNo} in channel ${channelId}:`, err);
       });

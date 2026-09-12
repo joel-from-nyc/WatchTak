@@ -1,4 +1,4 @@
-import { TextChannel, ThreadChannel } from 'discord.js';
+import { TextChannel, ThreadChannel, Message, MessageType, ComponentType } from 'discord.js';
 import { isGameActivelyWatched, parseThreadName } from './watcher';
 import { getGameRegistry } from './shared';
 
@@ -13,8 +13,16 @@ import { getGameRegistry } from './shared';
 // enough to survive either verb, tightly enough that nothing else in the
 // channel accidentally matches. Player names never contain spaces (PlayTak
 // usernames are single wire tokens), so splitting on " vs " is unambiguous.
-// The game number is captured too, for the orphaned-notice check.
-const NOTICE_LINE_PATTERN = /^(.+?) vs (.+?) \(#(\d+)\) has (?:started!|finished\.)$/;
+// The game number is optional in the text: notices from before it was added
+// there (August 2026) read just "X vs Y has finished.", and still need
+// pruning - parseNotice() recovers their number from the button instead.
+const NOTICE_LINE_PATTERN = /^(.+?) vs (.+?)(?: \(#(\d+)\))? has (?:started!|finished\.)$/;
+
+// The Watch/Review button seekToGame.ts attaches to every notice, whose
+// customId index.ts's button handler parses the game number back out of -
+// so it has carried the number on every notice ever posted, including the
+// ones whose text predates it.
+const NOTICE_BUTTON_PATTERN = /^watch(?:-review)?:(\d+)$/;
 
 // Reverses formatPlayerBold()'s "**name**" / "**name** (rating)" shape back
 // to the bare name - that function is the only place that builds this exact
@@ -25,23 +33,66 @@ function extractName(rawBoldName: string): string | undefined {
   return BOLD_NAME_PATTERN.exec(rawBoldName)?.[1];
 }
 
+function buttonGameNo(message: Message): number | undefined {
+  for (const row of message.components) {
+    if (row.type !== ComponentType.ActionRow) continue;
+    for (const component of row.components) {
+      const match = 'customId' in component && component.customId ? NOTICE_BUTTON_PATTERN.exec(component.customId) : null;
+      if (match) return Number(match[1]);
+    }
+  }
+  return undefined;
+}
+
 export interface ParsedNotice {
   white: string;
   black: string;
   gameNo: number;
 }
 
-// Parses a message's first line as a "vs ... has started!/finished." notice,
-// or returns undefined if it doesn't match that shape at all - shared by
-// every caller that needs to recover the players/game number a notice was
-// for from its own text (there's no other record of it once posted).
-export function parseNoticeLine(firstLine: string): ParsedNotice | undefined {
-  const match = NOTICE_LINE_PATTERN.exec(firstLine);
+// Parses a bot message as a "vs ... has started!/finished." notice, or
+// returns undefined if it isn't one - or is one so old it can't be tied to a
+// game number by either its text or its button, in which case it's left
+// alone rather than guessed at. Shared by every caller that needs to recover
+// the players/game a notice was for (there's no other record of it once
+// posted).
+export function parseNotice(message: Message): ParsedNotice | undefined {
+  const match = NOTICE_LINE_PATTERN.exec(message.content.split('\n', 1)[0]);
   if (!match) return undefined;
   const white = extractName(match[1]);
   const black = extractName(match[2]);
   if (white === undefined || black === undefined) return undefined;
-  return { white, black, gameNo: Number(match[3]) };
+  const gameNo = match[3] !== undefined ? Number(match[3]) : buttonGameNo(message);
+  if (gameNo === undefined) return undefined;
+  return { white, black, gameNo };
+}
+
+// Discord's own "WatchTak started a thread: ..." system line, posted in the
+// parent channel whenever the bot opens a game thread. Its message id is the
+// thread's id (confirmed against the live channel: so is its
+// message_reference.channel_id, and its content is the thread's name), which
+// is what lets a caller tell whether the thread it points at still exists.
+// Deleting a thread does *not* remove this line, so without explicit cleanup
+// every pruned thread leaves one behind - exactly the clutter that piled up
+// before this was handled.
+export function isThreadStarterMessage(message: Message, botId: string | undefined): boolean {
+  return message.type === MessageType.ThreadCreated && message.author.id === botId;
+}
+
+// Deletes a thread along with its "started a thread" line in the parent
+// channel (see isThreadStarterMessage() for why they share an id). Returns
+// whether the thread itself went; the starter line is best-effort on top.
+export async function deleteThread(thread: ThreadChannel): Promise<boolean> {
+  const deleted = await thread
+    .delete()
+    .then(() => true)
+    .catch((err) => {
+      console.error(`Failed to delete thread "${thread.name}":`, err);
+      return false;
+    });
+  const parent = thread.parent;
+  if (deleted && parent && 'messages' in parent) await parent.messages.delete(thread.id).catch(() => {});
+  return deleted;
 }
 
 // "Older than a day" threshold for every staleness check below - a separate
