@@ -13,6 +13,7 @@
     "deploy-commands:production": "ts-node src/deploy-commands.ts .env.production",
     "deploy-commands:testing": "ts-node src/deploy-commands.ts .env.testing",
     "dev": "ts-node src/index.ts",
+    "set-avatar": "ts-node src/scripts/set-avatar.ts",
     "start": "node dist/index.js",
     "start:production": "node dist/index.js .env.production",
     "start:testing": "node dist/index.js .env.testing"
