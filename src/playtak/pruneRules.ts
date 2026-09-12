@@ -180,6 +180,63 @@ export async function collectChannelThreads(channel: TextChannel): Promise<{ thr
   return { threads, complete };
 }
 
+// Discord refuses to bulk-delete any message older than two weeks, so
+// anything past this has to go one API call at a time - see deleteMessages().
+const MAX_BULK_DELETE_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+// Discord's own cap on one bulk-delete call.
+const BULK_DELETE_BATCH = 100;
+
+async function deleteOne(message: Message): Promise<boolean> {
+  return message
+    .delete()
+    .then(() => true)
+    .catch(() => false);
+}
+
+// Deletes a batch of this bot's messages, returning the ids that actually
+// went. Individual deletion is heavily throttled - it's what once left a
+// /prune run looking hung for minutes - so anything young enough goes
+// through bulkDelete instead, 100 per API call. Two things force the
+// one-at-a-time path: a message over two weeks old, which Discord refuses to
+// bulk-delete at all, and a channel where the bot lacks Manage Messages,
+// which bulk deletion requires but deleting one's own messages does not.
+// Neither is an error worth surfacing to the caller - the work still
+// completes, just slower - so the fallback is silent apart from one log
+// line, and the returned ids are the honest record of what was removed.
+export async function deleteMessages(channel: TextChannel, messages: Message[]): Promise<string[]> {
+  if (messages.length === 0) return [];
+
+  const now = Date.now();
+  const deleted: string[] = [];
+  const bulkable: Message[] = [];
+  const individual: Message[] = [];
+  for (const message of messages) {
+    (now - message.createdTimestamp < MAX_BULK_DELETE_AGE_MS ? bulkable : individual).push(message);
+  }
+
+  let bulkUnavailable = false;
+  for (let index = 0; index < bulkable.length; index += BULK_DELETE_BATCH) {
+    const batch = bulkable.slice(index, index + BULK_DELETE_BATCH);
+    // Once bulk deletion has failed here it will keep failing for the same
+    // reason (almost always a missing permission), so stop retrying it.
+    if (!bulkUnavailable) {
+      try {
+        await channel.bulkDelete(batch);
+        deleted.push(...batch.map((message) => message.id));
+        continue;
+      } catch (err) {
+        bulkUnavailable = true;
+        console.error(`Bulk delete unavailable in channel ${channel.id}, falling back to one at a time:`, err);
+      }
+    }
+    for (const message of batch) if (await deleteOne(message)) deleted.push(message.id);
+  }
+
+  for (const message of individual) if (await deleteOne(message)) deleted.push(message.id);
+  return deleted;
+}
+
 // This bot's own *watch* threads out of `threads`, keyed by PlayTak game
 // number - shared by every caller that needs to answer "does a real thread
 // exist for this notice's game" (and, for autoPrune.ts, get the thread

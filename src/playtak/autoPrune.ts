@@ -10,6 +10,7 @@ import {
   STALE_AGE_MS,
   isGameStillLive,
   collectChannelThreads,
+  deleteMessages,
   mapThreadsByGameNo,
   listReplayThreads,
   threadHasHumanMessages,
@@ -85,6 +86,13 @@ async function autoPruneChannel(discordClient: Client, channelId: string): Promi
     const batch = await channel.messages.fetch({ limit: MESSAGE_PAGE_SIZE, before: beforeId }).catch(() => null);
     if (!batch || batch.size === 0) break;
 
+    // Standalone removals (nothing else depends on them) are collected and
+    // deleted together at the end of the page - one bulk call instead of one
+    // per message, see deleteMessages(). The thread-and-its-notice pairing
+    // below stays sequential: that notice must only go once its thread
+    // actually has.
+    const doomed: Message[] = [];
+
     for (const message of batch.values()) {
       if (message.author.id !== botId) continue;
       if (Date.now() - message.createdTimestamp <= STALE_AGE_MS) continue;
@@ -93,7 +101,7 @@ async function autoPruneChannel(discordClient: Client, channelId: string): Promi
       // deleted (by /prune, or by an earlier pass here before that cleanup
       // was part of deleting a thread) - nothing left for it to point at.
       if (isThreadStarterMessage(message, botId)) {
-        if (!threadIds.has(message.id)) await deleteQuietly(message, 'orphaned thread-starter line');
+        if (!threadIds.has(message.id)) doomed.push(message);
         continue;
       }
 
@@ -108,7 +116,7 @@ async function autoPruneChannel(discordClient: Client, channelId: string): Promi
 
       const thread = threadsByGameNo.get(notice.gameNo);
       if (!thread) {
-        await deleteQuietly(message, 'orphaned notice');
+        doomed.push(message);
         continue;
       }
 
@@ -132,7 +140,11 @@ async function autoPruneChannel(discordClient: Client, channelId: string): Promi
       await deleteQuietly(message, `notice for game #${notice.gameNo}`);
     }
 
+    // Read before the deletions below: paging is keyed off message ids, and
+    // a deleted message is still a fine "everything before this" marker.
     beforeId = batch.last()?.id;
+    await deleteMessages(channel, doomed);
+
     if (batch.size < MESSAGE_PAGE_SIZE) break;
   }
 
