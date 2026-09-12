@@ -4,6 +4,7 @@ import {
   PermissionFlagsBits,
   TextChannel,
   ThreadChannel,
+  Message,
   MessageFlags,
 } from 'discord.js';
 import { wouldGameNoticeBeAllowed, isTrackedSeekMessage } from '../playtak/announcer';
@@ -41,14 +42,22 @@ export const data = new SlashCommandBuilder()
   // Same default as /announce, /showbots, /rating - Manage Channels.
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels);
 
-// /ping, /list, and /seeks now reply ephemerally (see ping.ts/list.ts/
-// seeks.ts), so any surviving *public* reply from one of them predates that
-// change and would never be posted publicly again - unconditionally stale,
-// unlike the rule-based notices above. Matched structurally (not against
-// exact copy) since /list and /seeks output is dynamic - one line per game/
-// seek - but each has a distinctive, stable shape: gamesReply.ts's line is
-// "#<gameNo> - **white** vs **black** (WxH, M+I, rated|unrated)" (no ratings
-// - that's the announcer's format, not this one), seeksReply.ts's is
+// Commands whose every reply is now ephemeral (visible only to whoever ran
+// them). An ephemeral reply never appears in channel history at all, so any
+// reply to one of these that a history fetch turns up is a public one from
+// before that change - unconditionally stale, since it would never be posted
+// publicly again, unlike the rule-based notices below. Identified by the
+// command name Discord records on every slash-command reply (confirmed
+// present on the channel's oldest replies). /announce and /watch are
+// deliberately absent: their replies are public by design.
+const NOW_EPHEMERAL_COMMANDS = new Set(['ping', 'list', 'seeks', 'help', 'showbots', 'rating', 'prune', 'expand']);
+
+// Safety net for the three commands that were public the longest, in case
+// the recorded command name is ever missing: matched structurally (not
+// against exact copy) since /list and /seeks output is dynamic - one line
+// per game/seek - but each has a distinctive, stable shape: gamesReply.ts's
+// line is "#<gameNo> - **white** vs **black** (WxH, M+I, rated|unrated)" (no
+// ratings - that's the announcer's format, not this one), seeksReply.ts's is
 // "**player** - WxH, M+I, <color>, rated|unrated", and both have a fixed
 // empty-state sentence. Checking just the first line is enough to identify
 // the whole message.
@@ -58,7 +67,15 @@ const EMPTY_SEEKS_REPLY = 'No open seeks on PlayTak right now.';
 const GAMES_REPLY_LINE_PATTERN = /^#\d+ - \*\*.+\*\* vs \*\*.+\*\* \(\d+x\d+, \d+\+\d+, (?:rated|unrated)\)/;
 const SEEKS_REPLY_LINE_PATTERN = /^\*\*.+\*\* - \d+x\d+, \d+\+\d+, (?:either color|white|black), (?:rated|unrated)$/;
 
-function isStaleEphemeralReply(content: string): boolean {
+function isStaleEphemeralReply(message: Message): boolean {
+  // `message.interaction` is discord.js-deprecated in favor of
+  // interactionMetadata, but that newer object doesn't carry the command
+  // name, and this one is still populated (with no runtime warning) - the
+  // recorded name is "prune messages" for a subcommand, hence the split.
+  const commandName = message.interaction?.commandName.split(' ', 1)[0];
+  if (commandName !== undefined && NOW_EPHEMERAL_COMMANDS.has(commandName)) return true;
+
+  const content = message.content;
   if (content === EMPTY_GAMES_REPLY || content === EMPTY_SEEKS_REPLY) return true;
   if (PING_REPLY_PATTERN.test(content)) return true;
   const firstLine = content.split('\n', 1)[0];
@@ -151,7 +168,7 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
         for (const message of batch.values()) {
           if (message.author.id !== botId) continue;
 
-          if (isStaleEphemeralReply(message.content)) {
+          if (isStaleEphemeralReply(message)) {
             if (await tryDelete(message)) stats.removed++;
             continue;
           }
@@ -210,8 +227,8 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
           : '';
       return (
         `Scanned ${stats.scanned} message${stats.scanned === 1 ? '' : 's'}, removed ${stats.removed} that wouldn't ` +
-        "be posted here now (game notices no longer matching this channel's rules, and old public /ping, /list, or " +
-        `/seeks replies).${orphanLine}`
+        "be posted here now (game notices no longer matching this channel's rules, and old public replies from " +
+        `commands that now reply privately).${orphanLine}`
       );
     },
   );

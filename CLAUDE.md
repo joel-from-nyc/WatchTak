@@ -76,9 +76,13 @@ separate instance, not a second server on the same process):
   match the channel's current `/announce`/`/showbots`/`/rating` settings,
   plus any over a day old that nobody ever chatted in (`/expand new`
   replay threads included). `messages` removes
-  channel messages that no longer match those settings, plus game notices
-  and Discord's own "started a thread" lines whose thread is gone (also a
-  day old). Live games are never touched.
+  channel messages that no longer match those settings, game notices and
+  Discord's own "started a thread" lines whose thread is gone (also a day
+  old), and any public reply from a command that now replies privately
+  (identified by the command name Discord records on every slash-command
+  reply — `message.interaction.commandName` — against the
+  `NOW_EPHEMERAL_COMMANDS` set in `prune.ts`; `/announce` and `/watch`
+  replies are public by design and stay). Live games are never touched.
   Requires Manage Channels; refuses to run until PlayTak's rating list has
   loaded at least once since the last restart, since a `/rating` rule
   can't be checked before then and deletion isn't reversible. Replies
