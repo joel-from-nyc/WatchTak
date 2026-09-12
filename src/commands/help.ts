@@ -4,20 +4,13 @@ import { SlashCommandBuilder, ChatInputCommandInteraction, MessageFlags, Permiss
 // enough to fully explain some of these - so /help has its own fuller,
 // hand-written text rather than reusing each command's `data.description`.
 const COMMANDS = [
-  '**/ping** - Health check. Replies with pong and the round-trip latency.',
-  '**/list** - Lists PlayTak games currently in progress, with board size, time control, and rated/unrated.',
-  '**/watch <game>** (also **/spectate**) - Follows a live PlayTak game: opens a thread (or reuses ' +
-    'one already watching it) and posts the board plus each move, in PTN notation, as it happens. `<game>` can be a ' +
-    'game ID or a player name - partial names work too and match anywhere in the name, not just the start ' +
-    '(e.g. "ppl" matches "gruppler"), but if it matches more than one active game you\'ll be asked to be more ' +
-    'specific. Leave `<game>` blank to just see the active game list, same as `/list`. Moves from before the watch ' +
-    'started (or missed during a long disconnect) appear as "Moves ..." text summaries - `/expand` can draw their boards.',
-  '**/expand here|new** - Run inside a game thread to draw the boards its "Moves ..." catch-up summaries ' +
-    "skipped. `here` edits each summary in place, attaching that stretch's board images (up to 10 per summary). " +
-    '`new` builds a separate replay thread showing every move and board of the game so far, then keeps following ' +
-    'the live game there too. Very long games are capped for `new` - use the ptn.ninja link posted at game end instead.',
-  '**/seeks** - Lists open public seeks on PlayTak - games anyone can join right now. Private challenges aimed ' +
-    'at a specific opponent are left out, since only that person can accept them.',
+  '**/ping** - Bot health check. Replies with round-trip latency.',
+  '**/list** - Lists PlayTak games currently in progress.',
+  '**/watch <PlayTakGame#>** or **<player_name>** (also **/spectate**) - Follows a live PlayTak game in a thread. ' +
+    'Partial name matches work.',
+  '**/expand here** or **new** - Use this inside a game thread to draw the boards and "catch-up" on any missed ' +
+    'moves from before the thread started. Either in an existing thread or a new one.',
+  '**/seeks** - Lists open public seeks on PlayTak',
   '**/help** - Shows this list.',
 ];
 
@@ -61,7 +54,7 @@ function chunk(header: string, entries: string[]): string[] {
   return chunks;
 }
 
-const COMMAND_CHUNKS = chunk('**Commands**', COMMANDS);
+const COMMAND_CHUNKS = chunk('**WatchTak Commands**', COMMANDS);
 const MOD_COMMAND_CHUNKS = chunk('**Mod Commands** (require Manage Channels)', MOD_COMMANDS);
 
 export const data = new SlashCommandBuilder()
