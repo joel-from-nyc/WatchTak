@@ -208,11 +208,17 @@ separate instance, not a second server on the same process):
 - `src/scripts/` — standalone probe scripts used to explore PlayTak's wire
   protocol against live traffic. Not wired into the bot; kept around as
   debugging tools.
-- `assets/watchtak-icon.webp` — the bot's current Discord profile picture
-  (donated by a community member), kept here just so it's versioned
-  somewhere. Nothing in code references this file - updating the bot's
-  actual avatar means re-uploading it in the Discord Developer Portal
-  directly, same as any other bot.
+- `assets/watchtak-icon.webp` / `.png` — the bot's Discord profile picture
+  (donated by a community member). The `.webp` is the original; the `.png`
+  is what actually gets uploaded, since Discord's avatar endpoint accepts
+  PNG/JPG/GIF but *not* WebP (discord.js labels the data URI `image/jpg`
+  whatever the real bytes are, so Discord sniffs the content and rejects a
+  WebP outright). Neither is referenced at runtime.
+- `src/scripts/set-avatar.ts` (`npm run set-avatar`) — sets the bot's
+  avatar from one of those files via `ClientUser#setAvatar`. Deliberately
+  a manual script, never something `index.ts` does on startup: Discord
+  rate-limits avatar changes to roughly a couple per hour, and this bot is
+  restarted on every deploy.
 
 ## Conventions to follow
 - TypeScript, strict mode is on in `tsconfig.json` — don't loosen it.
