@@ -69,6 +69,18 @@ function threadMessageCount(thread: ThreadChannel): number {
   return thread.totalMessageSent ?? thread.messageCount ?? 0;
 }
 
+// Whether the delete actually went through. Every deletion here is
+// best-effort (a missing permission or a vanished target just fails
+// quietly), so the counts in each summary only include the ones that
+// really happened - a "removed 40" that silently includes failures would
+// report a cleanup that didn't take place.
+async function tryDelete(target: { delete(): Promise<unknown> }): Promise<boolean> {
+  return target
+    .delete()
+    .then(() => true)
+    .catch(() => false);
+}
+
 // Shared scaffolding for all three subcommands: defers ephemerally (so the
 // progress heartbeat and final summary are visible only to whoever ran the
 // command, not the whole channel), posts a "still working" heartbeat every
@@ -136,8 +148,7 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
           if (message.author.id !== botId) continue;
 
           if (isStaleEphemeralReply(message.content)) {
-            await message.delete().catch(() => {});
-            stats.removed++;
+            if (await tryDelete(message)) stats.removed++;
             continue;
           }
 
@@ -163,7 +174,7 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
 
           if (!ruleMismatch && !orphaned) continue;
 
-          await message.delete().catch(() => {});
+          if (!(await tryDelete(message))) continue;
           stats.removed++;
           if (orphaned) stats.removedOrphaned++;
         }
@@ -217,7 +228,9 @@ async function pruneThreads(interaction: ChatInputCommandInteraction, channel: T
 
         // Only worth a message-history fetch when it can change the
         // outcome: the rule-mismatch path wants it purely to report human
-        // presence, and the staleness path needs it to fire at all.
+        // presence, and the staleness path needs it to fire at all. A
+        // definite `false` is the only answer that makes a thread stale -
+        // "couldn't check" (undefined) never does.
         let hadHumans: boolean | undefined;
         if (ruleMismatch || oldEnough) hadHumans = await threadHasHumanMessages(thread);
 
@@ -230,7 +243,7 @@ async function pruneThreads(interaction: ChatInputCommandInteraction, channel: T
         // removed; this just makes sure that isn't lost silently. A stale
         // thread, by definition, never has human messages, so there's
         // nothing to report there beyond the count.
-        await thread.delete().catch(() => {});
+        if (!(await tryDelete(thread))) continue;
         stats.removed++;
         if (ruleMismatch) {
           if (hadHumans) stats.removedWithHumans.push(thread.name);
@@ -280,12 +293,12 @@ async function pruneDuplicates(interaction: ChatInputCommandInteraction, channel
       for (const [gameNo, threads] of byGameNo) {
         if (threads.length < 2) continue;
 
-        // Safety: if a human ever posted in ANY of the duplicates, leave
-        // every one of them alone and just report the game - guessing which
-        // copy of a real conversation to keep isn't something this should
-        // do on its own.
+        // Safety: if a human ever posted in ANY of the duplicates - or that
+        // couldn't be checked for any of them - leave every one of them
+        // alone and just report the game. Guessing which copy of a real
+        // conversation to keep isn't something this should do on its own.
         const humanFlags = await Promise.all(threads.map((t) => threadHasHumanMessages(t)));
-        if (humanFlags.some(Boolean)) {
+        if (humanFlags.some((flag) => flag !== false)) {
           stats.skippedGroups.push(`#${gameNo} (${threads.length} threads: ${threads.map((t) => `${t}`).join(', ')})`);
           continue;
         }
@@ -297,8 +310,7 @@ async function pruneDuplicates(interaction: ChatInputCommandInteraction, channel
 
         for (const thread of threads) {
           if (thread.id === keeper.id) continue;
-          await thread.delete().catch(() => {});
-          stats.removed++;
+          if (await tryDelete(thread)) stats.removed++;
         }
       }
 

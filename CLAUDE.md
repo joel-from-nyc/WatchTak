@@ -127,13 +127,18 @@ separate instance, not a second server on the same process):
   (board-per-move) when the gap is ≤10 plies, or posted as
   /expand-fillable chunk summaries plus one current-position board when
   it's larger - `WatchState.historyMode`'s `'reconnect'` case. A finished
-  game's thread is warned, then archived+locked 24h later
-  (`scheduleClose()`/`closeThread()`); the warning message's own embedded
-  timestamp is the durable record of that deadline (`findCloseMarker()`
-  checks whether it's actually passed, not just whether a warning exists),
-  which is what lets the periodic sweep close a thread correctly even
-  across a restart or after it reopens from renewed chat, without
-  archiving early or looping on a re-warn.
+  game's thread gets one "will be archived" warning, then is archived and
+  locked once it's been quiet for 24h - 24h after its *most recent
+  message*, not after the game ended, so an ongoing discussion keeps
+  pushing the close out, and a closed thread a moderator reopens by
+  posting in it gets a fresh 24h rather than being shut again on the next
+  sweep. The warning message is the durable record: its embedded
+  timestamp is the deadline, it's edited in place whenever that moves
+  (never re-posted), and it's rewritten to "was archived on" only after
+  the archive actually succeeds. `findCloseMarker()`/`closeDueAt()`/
+  `reconcileClose()` are the whole mechanism, shared by the in-memory
+  close timer and the periodic sweep, so both make the same decision from
+  the same record even across a restart.
 - `src/playtak/pruneRules.ts` — staleness-scanning primitives (the stale-
   age threshold, "does a real thread exist for this notice's game", "has a
   human ever posted in this thread") shared by the manual `/prune` command

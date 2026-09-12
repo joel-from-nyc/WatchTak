@@ -51,11 +51,18 @@ const CLOSE_ARCHIVED_PREFIX = 'This thread was archived on';
 const CLOSE_MARKER_PATTERN = new RegExp(`^(?:${CLOSE_WARNING_PREFIX}|${CLOSE_ARCHIVED_PREFIX})`);
 
 // Recovers the Unix-seconds deadline embedded in a still-pending warning
-// (the `<t:...:R>` scheduleClose() posts) - lets sweepThreads() ask "is it
+// (the `<t:...:R>` warningText() renders) - lets the close logic ask "is it
 // actually time yet?" instead of just "does a warning exist?", which used to
-// let it archive a thread within one sweep interval of a game ending instead
-// of the intended 24h later.
+// let the sweep archive a thread within one sweep interval of a game ending
+// instead of the intended 24h later.
 const CLOSE_WARNING_DEADLINE_PATTERN = /<t:(\d+):R>/;
+
+// reconcileClose() only rewrites a warning when the deadline it shows is off
+// by more than this. The deadline is derived from message timestamps, which
+// only move when something actually happens in the thread, so this just
+// absorbs second-level rounding rather than letting every sweep pass issue
+// a no-op edit.
+const CLOSE_DEADLINE_SLOP_MS = 60 * 1000;
 
 // Embedded in every thread's name so a restarted bot (with no memory of its
 // own) can recover which PlayTak game a thread belongs to just by reading
@@ -405,32 +412,43 @@ async function resolveLowTimeWarning(state: WatchState, afterMove: boolean): Pro
   await warning.message.edit(staleWarningText(state, warning.color, afterMove)).catch(() => {});
 }
 
-// `warningMessage` is the original "will be archived" post, when the caller
-// already has it in hand (scheduleClose()'s own timer does); otherwise it's
-// looked up fresh - the cold-restart path through sweepThreads() has no
-// in-memory reference to reuse. `:D` (a plain date, no time) matches the
-// "archived on" wording - the exact time isn't especially useful once the
-// countdown that used to show it is gone.
+// Archives and locks the thread, then rewrites its close marker into the
+// "was archived on" record. Archive first, marker second: the marker is the
+// durable record everything else reads back (see findCloseMarker()), so it
+// must only ever claim the thread was archived once that's actually true.
+// `:D` (a plain date, no time) matches the "archived on" wording - the exact
+// time isn't especially useful once the countdown that used to show it is
+// gone.
 //
-// Safe to call more than once on the same thread - sweepThreads() does,
-// whenever it finds one still (or again) active past its deadline (see its
-// own comment on why that can happen). The message is only rewritten the
-// first time (checked directly on its current text, not a separate flag,
-// since that text IS the durable record of whether this already happened),
-// and archiving/locking an already-archived thread is a harmless no-op.
-async function closeThread(thread: ThreadChannel, warningMessage?: Message): Promise<void> {
-  const message = warningMessage ?? (await findCloseMarker(thread))?.message;
-  if (message && !message.content.startsWith(CLOSE_ARCHIVED_PREFIX)) {
-    await message.edit(`${CLOSE_ARCHIVED_PREFIX} <t:${Math.floor(Date.now() / 1000)}:D>.`).catch(() => {});
-  }
-
-  // Archived and locked in one call rather than two separate ones - partly
-  // tidiness, but mainly to close the window a two-call sequence leaves open
-  // for a message (from a human still chatting) to land in between and
-  // un-archive the thread again before it's actually locked.
-  await thread.edit({ archived: true, locked: true }).catch((err) => {
-    console.error(`Failed to archive/lock thread ${thread.id}:`, err);
-  });
+// Archived and locked in one call rather than two - partly tidiness, but
+// mainly to close the window a two-call sequence leaves open for a message
+// (from a human still chatting) to land in between and un-archive the thread
+// again before it's actually locked. Locking needs Manage Threads where
+// archiving one's own thread doesn't, so if the combined edit is refused,
+// fall back to archiving alone rather than doing nothing: an unlocked
+// archived thread just reopens on the next human post and gets a fresh
+// countdown from the sweep, which is a far better failure mode than a thread
+// that never closes at all.
+//
+// Safe to call more than once on the same thread: re-archiving an archived
+// thread is a no-op, and the marker is only rewritten while it still reads
+// as pending.
+async function closeThread(thread: ThreadChannel, marker: CloseMarker | undefined): Promise<void> {
+  const archived = await thread
+    .edit({ archived: true, locked: true })
+    .then(() => true)
+    .catch(async (err) => {
+      console.error(`Failed to archive+lock thread ${thread.id}, trying archive alone:`, err);
+      return thread
+        .setArchived(true)
+        .then(() => true)
+        .catch((fallbackErr) => {
+          console.error(`Failed to archive thread ${thread.id}:`, fallbackErr);
+          return false;
+        });
+    });
+  if (!archived || !marker || marker.alreadyArchived) return;
+  await marker.message.edit(`${CLOSE_ARCHIVED_PREFIX} <t:${Math.floor(Date.now() / 1000)}:D>.`).catch(() => {});
 }
 
 // Text and board image in the same message, so the board always lands right
@@ -526,12 +544,67 @@ function beginObserving(playtak: PlaytakClient, state: WatchState): void {
   playtak.send(`Observe ${state.gameNo}`);
 }
 
+function warningText(deadlineMs: number): string {
+  return `${CLOSE_WARNING_PREFIX} <t:${Math.floor(deadlineMs / 1000)}:R>.`;
+}
+
+// Fires reconcileClose() for the thread at `atMs`. The timer re-reads the
+// thread's marker rather than trusting the deadline it was armed with: by
+// then the deadline may have moved (see closeDueAt()), and a thread whose
+// marker has gone missing is left for the sweep to re-warn rather than
+// closed blind.
+function armCloseTimer(thread: ThreadChannel, atMs: number): void {
+  setTimeout(
+    () => {
+      findCloseMarker(thread)
+        .then((marker) => (marker ? reconcileClose(thread, marker) : undefined))
+        .catch((err) => console.error(`Failed to close thread ${thread.id} on schedule:`, err));
+    },
+    Math.max(0, atMs - Date.now()),
+  );
+}
+
+// Posts the close warning with its deadline embedded, and arms the timer
+// for it.
 async function scheduleClose(thread: ThreadChannel): Promise<void> {
-  const closeAtMs = Date.now() + THREAD_CLOSE_DELAY_MS;
-  const message = await thread
-    .send(`${CLOSE_WARNING_PREFIX} <t:${Math.floor(closeAtMs / 1000)}:R>.`)
-    .catch(() => undefined);
-  setTimeout(() => closeThread(thread, message), THREAD_CLOSE_DELAY_MS);
+  const deadlineMs = Date.now() + THREAD_CLOSE_DELAY_MS;
+  await thread.send(warningText(deadlineMs)).catch(() => {});
+  armCloseTimer(thread, deadlineMs);
+}
+
+// When this thread should actually close, given everything known about it:
+// 24h after its most recent message, or the deadline its pending warning
+// already shows, whichever is later. Keying off the most recent message is
+// what makes a live conversation keep pushing the close out, and a closed
+// thread that someone reopened get a fresh 24h rather than being shut again
+// on the next sweep pass - the behavior a channel moderator explicitly asked
+// for, in place of a fixed 24h-from-game-end that would slam a thread shut
+// mid-discussion. A pending marker's own deadline is honored too, so the
+// close can never come earlier than what the thread was already told.
+function closeDueAt(marker: CloseMarker): number {
+  const fromActivity = marker.lastActivityMs + THREAD_CLOSE_DELAY_MS;
+  return marker.deadlineMs === undefined ? fromActivity : Math.max(marker.deadlineMs, fromActivity);
+}
+
+// Brings a still-open thread's close lifecycle up to date with its marker:
+// closes it if it's due, otherwise makes sure the marker shows the right
+// deadline - rewriting it in place, never posting a new one, whenever the
+// deadline has moved, or the thread was reopened after being closed and its
+// marker still reads "was archived". Shared by the close timer and by
+// sweepThreads(), so both paths make the same decision from the same durable
+// record. A rewrite re-arms the timer for the new deadline; a timer that
+// then fires to find its deadline superseded sees nothing to do, so timers
+// never pile up.
+async function reconcileClose(thread: ThreadChannel, marker: CloseMarker): Promise<void> {
+  const dueAt = closeDueAt(marker);
+  if (Date.now() >= dueAt) {
+    await closeThread(thread, marker);
+    return;
+  }
+  const shown = marker.alreadyArchived ? undefined : marker.deadlineMs;
+  if (shown !== undefined && Math.abs(dueAt - shown) <= CLOSE_DEADLINE_SLOP_MS) return;
+  await marker.message.edit(warningText(dueAt)).catch(() => {});
+  armCloseTimer(thread, dueAt);
 }
 
 async function handleGameEnd(playtak: PlaytakClient, state: WatchState, resultText: string): Promise<void> {
@@ -916,31 +989,43 @@ async function createReconstructedThread(parentChannel: TextChannel, gameNo: num
 }
 
 // A thread's close-lifecycle post, and which of its two states it's
-// currently in (see CLOSE_WARNING_PREFIX/CLOSE_ARCHIVED_PREFIX).
-// `deadlineMs`, only meaningful while still pending, is the actual moment
-// scheduleClose() committed to archiving it. An undefined deadline
-// (a malformed or missing timestamp) is treated by every caller as "not due"
-// rather than "due", so a parse failure can only delay a close, never cause
-// an early one.
+// currently in (see CLOSE_WARNING_PREFIX/CLOSE_ARCHIVED_PREFIX), plus the
+// one other fact the close decision needs - see closeDueAt().
 interface CloseMarker {
   message: Message;
   alreadyArchived: boolean;
+  // The deadline a pending warning currently shows. Undefined once archived,
+  // or if the text couldn't be parsed - in which case closeDueAt() falls back
+  // to activity-based timing alone, so a broken marker can only ever delay a
+  // close to "24h after the last message", never cause an early one.
   deadlineMs?: number;
+  // When the thread's newest message was posted - the marker itself, if
+  // nothing came after it.
+  lastActivityMs: number;
 }
 
 // Finds this thread's own close-lifecycle post, if it already has one - used
 // to detect that (so sweepThreads() doesn't restart the warn-then-close
-// cycle from scratch on every pass), to decide whether it's actually due yet
-// (see CloseMarker above), and, via closeThread()'s fallback lookup, to find
-// the message to rewrite once the thread is actually closed.
+// cycle from scratch on every pass), and to decide whether it's actually
+// due yet (see closeDueAt()). Looks back 100 messages rather than a handful:
+// the marker is posted at game end, so everything after it is human
+// discussion, and a lively one can easily run past ten messages - missing
+// the marker behind them would restart the warn cycle with a fresh post,
+// the exact spam this exists to prevent.
 async function findCloseMarker(thread: ThreadChannel): Promise<CloseMarker | undefined> {
-  const recent = await thread.messages.fetch({ limit: 10 }).catch(() => null);
+  const recent = await thread.messages.fetch({ limit: 100 }).catch(() => null);
   const message = recent?.find((m) => CLOSE_MARKER_PATTERN.test(m.content));
-  if (!message) return undefined;
-  if (message.content.startsWith(CLOSE_ARCHIVED_PREFIX)) return { message, alreadyArchived: true };
+  if (!recent || !message) return undefined;
+  const lastActivityMs = Math.max(...recent.map((m) => m.createdTimestamp));
+  if (message.content.startsWith(CLOSE_ARCHIVED_PREFIX)) return { message, alreadyArchived: true, lastActivityMs };
 
   const match = CLOSE_WARNING_DEADLINE_PATTERN.exec(message.content);
-  return { message, alreadyArchived: false, deadlineMs: match ? Number(match[1]) * 1000 : undefined };
+  return {
+    message,
+    alreadyArchived: false,
+    deadlineMs: match ? Number(match[1]) * 1000 : undefined,
+    lastActivityMs,
+  };
 }
 
 // Matches the "Move: <number><W/B>. <ptn>" line every move/undo post carries
@@ -1049,16 +1134,15 @@ async function resumeWatchingThread(playtak: PlaytakClient, thread: ThreadChanne
 //   replays again on the fresh Observe, so this is the same "resume" path
 //   used on reconnect.
 // - No longer active? The game ended. If nothing's been posted about it yet,
-//   warn and start its 24h clock, mirroring the live game-over path. If a
-//   warning already exists, only actually close the thread once its
-//   embedded deadline has passed (see findCloseMarker()) - not merely
-//   because a warning exists, which used to archive every game's thread
-//   within one sweep interval of it ending rather than the intended 24h
-//   later. The in-memory setTimeout from the original scheduleClose() call
-//   handles the common case with better precision than this sweep's own
-//   interval could; this branch is what still closes it correctly if that
-//   timer was lost to a restart, or if the thread reopened after being
-//   closed once already (closeThread() is safe to call again either way).
+//   warn and start its 24h clock, mirroring the live game-over path.
+//   Otherwise hand it to reconcileClose(), which closes it only once it's
+//   actually due (see closeDueAt()) - not merely because a warning exists,
+//   which used to archive every game's thread within one sweep interval of
+//   it ending rather than the intended 24h later - and otherwise keeps the
+//   existing warning's deadline current. The in-memory close timer handles
+//   the common case with better precision than this sweep's own interval
+//   could; this branch is what still gets it right if that timer was lost
+//   to a restart, or if the thread reopened after being closed once already.
 export async function sweepThreads(discordClient: Client, playtak: PlaytakClient, registry: GameRegistry): Promise<void> {
   const botId = discordClient.user?.id;
   if (!botId) return;
@@ -1090,14 +1174,12 @@ export async function sweepThreads(discordClient: Client, playtak: PlaytakClient
       if (activeWatches.has(gameNo)) continue;
 
       const marker = await findCloseMarker(thread);
-      if (!marker) {
+      if (marker) {
+        await reconcileClose(thread, marker);
+      } else {
         await thread.send('This game appears to have ended.').catch(() => {});
         await scheduleClose(thread);
-      } else if (marker.alreadyArchived || marker.deadlineMs === undefined || Date.now() >= marker.deadlineMs) {
-        await closeThread(thread, marker.message);
       }
-      // else: already warned, deadline not reached yet - leave it for the
-      // real timer (or a later sweep) to close once it actually is.
     }
   }
 }

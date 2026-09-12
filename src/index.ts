@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Collection, ChatInputCommandInteraction, TextChannel } from 'discord.js';
+import { Client, GatewayIntentBits, Collection, ChatInputCommandInteraction, TextChannel, MessageFlags } from 'discord.js';
 import dotenv from 'dotenv';
 import * as ping from './commands/ping';
 import * as list from './commands/list';
@@ -33,6 +33,20 @@ if (!DISCORD_TOKEN) {
 // Intents declare which events Discord will send us. Keep this list minimal -
 // request more only as you actually need them (e.g. GuildMembers, MessageContent).
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+// Neither of these should fire in normal operation, but each is a
+// process-killer if left unhandled: an 'error' the Client emits with no
+// listener is rethrown by Node, and an unhandled promise rejection
+// terminates the process outright. For an always-on service, logging and
+// carrying on is the right response to both - the service manager would
+// restart a crashed process anyway, but only after losing every in-memory
+// watch, mirror thread, and pending seek correlation along with it.
+client.on('error', (err) => {
+  console.error('Discord client error:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection:', reason);
+});
 
 // A simple in-memory registry of commands, keyed by name, so the
 // interactionCreate handler below can look up and run the right one.
@@ -86,15 +100,15 @@ client.on('interactionCreate', async (interaction) => {
         const gameNo = Number(watchMatch[1]);
         const game = getGameRegistry().find(gameNo);
         if (!game) {
-          await interaction.reply({ content: 'That game has already ended.', ephemeral: true });
+          await interaction.reply({ content: 'That game has already ended.', flags: MessageFlags.Ephemeral });
           return;
         }
         if (!(interaction.channel instanceof TextChannel)) {
-          await interaction.reply({ content: 'This only works in a text channel.', ephemeral: true });
+          await interaction.reply({ content: 'This only works in a text channel.', flags: MessageFlags.Ephemeral });
           return;
         }
 
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const { thread, alreadyWatching } = await watchGame(getPlaytakClient(), interaction.channel, game);
         await interaction.editReply(
           alreadyWatching ? `This game already has a thread. Spectate: ${thread}` : `Spectate: ${thread}`,
@@ -108,26 +122,37 @@ client.on('interactionCreate', async (interaction) => {
 
         const existingThread = getWatchedThread(gameNo);
         if (existingThread) {
-          await interaction.reply({ content: `Spectate: ${existingThread}`, ephemeral: true });
+          await interaction.reply({ content: `Spectate: ${existingThread}`, flags: MessageFlags.Ephemeral });
           return;
         }
         if (!(interaction.channel instanceof TextChannel)) {
-          await interaction.reply({ content: 'This only works in a text channel.', ephemeral: true });
+          await interaction.reply({ content: 'This only works in a text channel.', flags: MessageFlags.Ephemeral });
           return;
         }
 
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const thread = await reconstructThread(interaction.channel, gameNo);
         await interaction.editReply(thread ? `Spectate: ${thread}` : "Couldn't find a record of that game.");
       }
     }
   } catch (err) {
     console.error('Error handling interaction:', err);
-    const errorReply = { content: 'Something went wrong running that command.', ephemeral: true };
-    if (interaction.isRepliable() && (interaction.replied || interaction.deferred)) {
-      await interaction.followUp(errorReply);
-    } else if (interaction.isRepliable()) {
-      await interaction.reply(errorReply);
+    // Best-effort only. If the interaction itself is what failed - expired
+    // before it was acknowledged (Discord allows 3s), or otherwise unknown -
+    // this reply fails the same way, and that failure has to be swallowed
+    // here: thrown from inside a catch it escapes the handler, surfaces as
+    // an unhandled 'error' on the Client, and takes the whole process down,
+    // which is exactly how one slow /prune acknowledgement once crashed the
+    // bot.
+    const errorReply = { content: 'Something went wrong running that command.', flags: MessageFlags.Ephemeral } as const;
+    try {
+      if (interaction.isRepliable() && (interaction.replied || interaction.deferred)) {
+        await interaction.followUp(errorReply);
+      } else if (interaction.isRepliable()) {
+        await interaction.reply(errorReply);
+      }
+    } catch (replyErr) {
+      console.error('Could not report that error back to the user (the interaction is likely gone):', replyErr);
     }
   }
 });

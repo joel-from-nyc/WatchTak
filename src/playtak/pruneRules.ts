@@ -80,12 +80,16 @@ const MAX_HUMAN_CHECK_PAGES = 5;
 // Whether any human has ever posted in this thread. `author.bot` is
 // Discord's own flag for a bot/application account, so this correctly
 // excludes both this bot's own move-by-move posts and anything any other bot
-// might have said - only a genuine human message counts.
-export async function threadHasHumanMessages(thread: ThreadChannel): Promise<boolean> {
+// might have said - only a genuine human message counts. Returns undefined
+// when a fetch failed before any human turned up - "couldn't tell", which
+// every caller must treat differently from a definite `false`, since the
+// answer gates deleting a thread that might hold a real conversation.
+export async function threadHasHumanMessages(thread: ThreadChannel): Promise<boolean | undefined> {
   let before: string | undefined;
   for (let page = 0; page < MAX_HUMAN_CHECK_PAGES; page++) {
     const batch = await thread.messages.fetch({ limit: 100, before }).catch(() => null);
-    if (!batch || batch.size === 0) break;
+    if (!batch) return undefined;
+    if (batch.size === 0) break;
     for (const message of batch.values()) {
       if (!message.author.bot) return true;
     }
