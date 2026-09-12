@@ -16,6 +16,7 @@ import { registerWatcher, watchGame, getWatchedThread, reconstructThread } from 
 import { registerAnnouncer, shutdownAnnouncer } from './playtak/announcer';
 import { registerSeekToGame } from './playtak/seekToGame';
 import { startRatingsRefresh } from './playtak/ratings';
+import { registerAutoPrune } from './playtak/autoPrune';
 
 // Which .env file to load - defaults to plain .env, but a specific instance
 // (e.g. `node dist/index.js .env.production`) can point at its own file, so
@@ -60,6 +61,7 @@ client.once('ready', (readyClient) => {
   registerWatcher(playtak, readyClient, gameRegistry);
   registerAnnouncer(playtak, readyClient);
   registerSeekToGame(playtak, readyClient);
+  registerAutoPrune(playtak, readyClient);
   startRatingsRefresh();
 });
 
