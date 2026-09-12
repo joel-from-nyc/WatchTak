@@ -5,7 +5,8 @@ export const data = new SlashCommandBuilder()
   .setDescription('Replies with pong and the bot latency');
 
 export async function execute(interaction: ChatInputCommandInteraction) {
-  const sent = await interaction.reply({ content: 'Pinging...', flags: MessageFlags.Ephemeral, fetchReply: true });
-  const latency = sent.createdTimestamp - interaction.createdTimestamp;
+  const response = await interaction.reply({ content: 'Pinging...', flags: MessageFlags.Ephemeral, withResponse: true });
+  const sentAt = response.resource?.message?.createdTimestamp ?? Date.now();
+  const latency = sentAt - interaction.createdTimestamp;
   await interaction.editReply(`Pong! Latency: ${latency}ms`);
 }

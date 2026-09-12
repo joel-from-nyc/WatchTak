@@ -1,4 +1,4 @@
-import { Client } from 'discord.js';
+import { Client, ThreadChannel } from 'discord.js';
 import { PlaytakClient } from './client';
 import { loadAnnounceState } from './announceStore';
 import { fetchTextChannel, isTrackedSeekMessage } from './announcer';
@@ -19,8 +19,7 @@ import {
 // STALE_AGE_MS), so this only needs to be frequent enough that a message
 // doesn't sit stale for long after crossing that line - a much looser
 // cadence than watcher.ts's own 15-minute thread-lifecycle sweep, since this
-// one pays for a full channel-message scan (plus a human-message check per
-// candidate thread) on every pass.
+// one pays for a full channel-message scan on every pass.
 const AUTO_PRUNE_INTERVAL_MS = 30 * 60 * 1000;
 
 // Give the post-(re)connect GameList/seek replay a moment to land before the
@@ -28,6 +27,21 @@ const AUTO_PRUNE_INTERVAL_MS = 30 * 60 * 1000;
 // live" (isGameStillLive()) against a registry that hasn't been repopulated
 // yet.
 const STARTUP_DELAY_MS = 10_000;
+
+// Threads already confirmed to have human messages in them. Nothing here
+// ever deletes individual messages, so a thread that has them keeps them,
+// and once known this never needs re-checking. Without this, every stale
+// notice whose thread is being kept for its conversation would cost a fresh
+// message-history scan on every pass, forever, growing with every game the
+// channel ever discussed.
+const threadsWithHumans = new Set<string>();
+
+async function hasHumanMessages(thread: ThreadChannel): Promise<boolean | undefined> {
+  if (threadsWithHumans.has(thread.id)) return true;
+  const found = await threadHasHumanMessages(thread);
+  if (found) threadsWithHumans.add(thread.id);
+  return found;
+}
 
 // Implements exactly what a channel moderator asked for: a day after a
 // game-started/finished notice is posted, if nobody ever actually watched
@@ -78,16 +92,30 @@ async function autoPruneChannel(discordClient: Client, channelId: string): Promi
         continue;
       }
 
-      // A thread exists - only clean up if nobody ever actually chatted in
-      // it. Real conversation means both the thread and its notice are left
-      // alone, permanently (there's no re-check later - once a thread has
-      // human messages it's safe forever, the same invariant /prune itself
-      // relies on).
-      if (await threadHasHumanMessages(thread)) continue;
+      // The thread has to be over a day old in its own right, not just its
+      // notice - a notice can be older than its game (a seek announcement
+      // that sat open a while before being converted), and deleting a thread
+      // watcher.ts still has a pending close timer on would just make that
+      // timer fail noisily. Nothing is lost by waiting for a later pass.
+      if (Date.now() - (thread.createdTimestamp ?? Date.now()) <= STALE_AGE_MS) continue;
 
-      await thread.delete().catch((err) => {
-        console.error(`Auto-prune: failed to delete stale thread for game #${notice.gameNo} in channel ${channelId}:`, err);
-      });
+      // Only a definite "nobody ever posted" clears the thread for removal -
+      // "couldn't check" (undefined) is treated the same as "someone did".
+      // Real conversation means both the thread and its notice are left
+      // alone, permanently.
+      if ((await hasHumanMessages(thread)) !== false) continue;
+
+      const threadDeleted = await thread
+        .delete()
+        .then(() => true)
+        .catch((err) => {
+          console.error(`Auto-prune: failed to delete stale thread for game #${notice.gameNo} in channel ${channelId}:`, err);
+          return false;
+        });
+      // The notice only goes once its thread is actually gone - otherwise
+      // the thread would be left with nothing pointing at it, and nothing
+      // to ever clean it up by either, since this scan is keyed off notices.
+      if (!threadDeleted) continue;
       await message.delete().catch((err) => {
         console.error(`Auto-prune: failed to delete notice for game #${notice.gameNo} in channel ${channelId}:`, err);
       });
@@ -98,7 +126,7 @@ async function autoPruneChannel(discordClient: Client, channelId: string): Promi
   }
 }
 
-// Every channel with /announce ever configured on it - the only channels
+// Every channel with /announce currently configured - the only channels
 // seekToGame.ts posts these notices to, so it's also the complete list of
 // channels worth checking. Read from the persisted store rather than the
 // live `announcements` map so this doesn't depend on resumeAnnouncing()

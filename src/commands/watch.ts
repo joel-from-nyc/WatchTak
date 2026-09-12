@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, TextChannel } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, TextChannel, MessageFlags } from 'discord.js';
 import { GameListEntry } from '../playtak/protocol';
 import { getGameRegistry, getPlaytakClient } from '../playtak/shared';
 import { buildGamesListReply } from '../playtak/gamesReply';
@@ -34,7 +34,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   if (matches.length === 0) {
     await interaction.reply({
       content: `No active game found matching "${query}". Try \`/watch\` with no argument to see what's active.`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -43,7 +43,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     const options = matches.map(describeGame).join('\n');
     await interaction.reply({
       content: `"${query}" matches more than one active game:\n${options}\nTry again with a game ID, or a more specific name.`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -51,7 +51,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const game = matches[0];
 
   if (!(interaction.channel instanceof TextChannel)) {
-    await interaction.reply({ content: 'This command only works in a text channel.', ephemeral: true });
+    await interaction.reply({ content: 'This command only works in a text channel.', flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -66,7 +66,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     // post, so multiple people trying to watch the same popular game don't
     // spam the channel.
     await interaction.deleteReply().catch(() => {});
-    await interaction.followUp({ content: `This game already has a thread. Spectate: ${thread}`, ephemeral: true });
+    await interaction.followUp({ content: `This game already has a thread. Spectate: ${thread}`, flags: MessageFlags.Ephemeral });
     return;
   }
 
