@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, PermissionFlagsBits } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, PermissionFlagsBits, MessageFlags } from 'discord.js';
 import {
   isAnnouncing,
   getAnnounceMode,
@@ -78,11 +78,16 @@ function statusText(channelId: string): string {
   return MODE_STATUS[getAnnounceMode(channelId)];
 }
 
+// Every reply here is ephemeral except the "now on" confirmation: that one
+// is a live banner for the channel, tracked by announcer.ts and deleted
+// again on /announce off or a restart. The rest - status checks, "already
+// on/off", mode switches, "now off" - are point-in-time statements that
+// would otherwise pile up in the channel as permanent clutter.
 export async function execute(interaction: ChatInputCommandInteraction) {
   const state = interaction.options.getString('state');
 
   if (!state) {
-    await interaction.reply(statusText(interaction.channelId));
+    await interaction.reply({ content: statusText(interaction.channelId), flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -91,13 +96,13 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
     if (isAnnouncing(interaction.channelId)) {
       if (getAnnounceMode(interaction.channelId) === mode) {
-        await interaction.reply(MODE_ALREADY_ON[mode]);
+        await interaction.reply({ content: MODE_ALREADY_ON[mode], flags: MessageFlags.Ephemeral });
         return;
       }
       // Switching mode on an already-active channel - just flip the flag,
       // no need to touch the seek list itself.
       setAnnounceMode(interaction.channelId, mode);
-      await interaction.reply(MODE_SWITCHED_TO[mode]);
+      await interaction.reply({ content: MODE_SWITCHED_TO[mode], flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -114,10 +119,13 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   // state === 'off'
   if (!isAnnouncing(interaction.channelId)) {
-    await interaction.reply('Seek announcements are already **off** in this channel.');
+    await interaction.reply({
+      content: 'Seek announcements are already **off** in this channel.',
+      flags: MessageFlags.Ephemeral,
+    });
     return;
   }
-  await interaction.deferReply();
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   await turnOffAnnounce(interaction.client, interaction.channelId);
   await interaction.editReply('Seek announcements are now **off** in this channel, and I cleared the ones I posted.');
 }

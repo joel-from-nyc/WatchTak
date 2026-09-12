@@ -12,6 +12,7 @@ import { isTrackedGameMessage } from '../playtak/seekToGame';
 import { isGameActivelyWatched, getWatchedThread, parseThreadName } from '../playtak/watcher';
 import { areRatingsLoaded } from '../playtak/ratings';
 import { parseReplayThreadName } from '../playtak/catchup';
+import { loadAnnounceState } from '../playtak/announceStore';
 import {
   parseNotice,
   isThreadStarterMessage,
@@ -157,6 +158,10 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
       stats.orphanCheckSkipped = !threadScanComplete;
       const threadGameNumbers = new Set(mapThreadsByGameNo(channelThreads, botId).keys());
       const threadIds = new Set(channelThreads.map((thread) => thread.id));
+      // The one /announce reply that still means something: the live "now
+      // on" banner announcer.ts tracks (and deletes itself on /announce off
+      // or a restart). Undefined when announcing is off here.
+      const trackedConfirmationId = loadAnnounceState()[channelId]?.confirmationMessageId;
 
       let beforeId: string | undefined;
 
@@ -170,6 +175,39 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
 
           if (isStaleEphemeralReply(message)) {
             if (await tryDelete(message)) stats.removed++;
+            continue;
+          }
+
+          const commandName = message.interaction?.commandName.split(' ', 1)[0];
+
+          // /watch's "Spectate: <#thread>" reply is public on purpose - it's
+          // the link to the thread - but once that thread is gone it renders
+          // as "#unknown" and points at nothing. Same complete-scan and
+          // day-old safeguards as the other thread-existence checks below.
+          if (commandName === 'watch' || commandName === 'spectate') {
+            const linkedThreadId = /<#(\d+)>/.exec(message.content)?.[1];
+            const orphanedLink =
+              linkedThreadId !== undefined &&
+              threadScanComplete &&
+              Date.now() - message.createdTimestamp > STALE_AGE_MS &&
+              !threadIds.has(linkedThreadId);
+            if (orphanedLink && (await tryDelete(message))) {
+              stats.removed++;
+              stats.removedOrphaned++;
+            }
+            continue;
+          }
+
+          // /announce replies are point-in-time statements ("on in this
+          // channel", "switched to quiet") that stop being true the moment
+          // the setting changes - only the tracked "now on" banner (see
+          // trackedConfirmationId above) is kept. Day-old like every other
+          // rule here, which also means a banner posted by an /announce on
+          // running *during* this scan - too new to be in the state read
+          // above - can't be caught out by the race.
+          if (commandName === 'announce') {
+            const outdated = message.id !== trackedConfirmationId && Date.now() - message.createdTimestamp > STALE_AGE_MS;
+            if (outdated && (await tryDelete(message))) stats.removed++;
             continue;
           }
 
@@ -222,13 +260,13 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
         ? ' (Skipped checking for notices with a missing thread this run - this channel has more archived threads ' +
           "than one pass covers, so a thread's absence couldn't be confirmed safely.)"
         : stats.removedOrphaned > 0
-          ? ` ${stats.removedOrphaned} of those were game notices or "started a thread" lines whose thread could no ` +
-            'longer be found, over a day old.'
+          ? ` ${stats.removedOrphaned} of those were game notices, "started a thread" lines, or /watch links whose ` +
+            'thread could no longer be found, over a day old.'
           : '';
       return (
         `Scanned ${stats.scanned} message${stats.scanned === 1 ? '' : 's'}, removed ${stats.removed} that wouldn't ` +
-        "be posted here now (game notices no longer matching this channel's rules, and old public replies from " +
-        `commands that now reply privately).${orphanLine}`
+        "be posted here now (game notices no longer matching this channel's rules, old public replies from " +
+        `commands that now reply privately, and outdated /announce status replies).${orphanLine}`
       );
     },
   );

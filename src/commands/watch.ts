@@ -22,7 +22,8 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const query = interaction.options.getString('game')?.trim();
 
   if (!query) {
-    await interaction.reply(buildGamesListReply());
+    // Same output as /list, and private for the same reason.
+    await interaction.reply({ content: buildGamesListReply(), flags: MessageFlags.Ephemeral });
     return;
   }
 
