@@ -180,6 +180,11 @@ separate instance, not a second server on the same process):
 - `src/scripts/` — standalone probe scripts used to explore PlayTak's wire
   protocol against live traffic. Not wired into the bot; kept around as
   debugging tools.
+- `assets/watchtak-icon.webp` — the bot's current Discord profile picture
+  (donated by a community member), kept here just so it's versioned
+  somewhere. Nothing in code references this file - updating the bot's
+  actual avatar means re-uploading it in the Discord Developer Portal
+  directly, same as any other bot.
 
 ## Conventions to follow
 - TypeScript, strict mode is on in `tsconfig.json` — don't loosen it.
