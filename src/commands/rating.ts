@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, PermissionFlagsBits } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, PermissionFlagsBits, MessageFlags } from 'discord.js';
 import { getRatingRule, setRatingRule, RatingRule } from '../playtak/ratingStore';
 
 export const data = new SlashCommandBuilder()
@@ -23,24 +23,30 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   if (off) {
     setRatingRule(channelId, undefined);
-    await interaction.reply('Rating filter cleared - normal /announce and /showbots filtering applies again.');
+    await interaction.reply({
+      content: 'Rating filter cleared - normal /announce and /showbots filtering applies again.',
+      flags: MessageFlags.Ephemeral,
+    });
     return;
   }
 
   if (human === null && bot === null) {
     const rule = getRatingRule(channelId);
-    await interaction.reply(
-      rule
+    await interaction.reply({
+      content: rule
         ? `Rating filter in this channel: only showing ${describeRule(rule)}. Everything else is hidden.`
         : 'No rating filter is set in this channel.',
-    );
+      flags: MessageFlags.Ephemeral,
+    });
     return;
   }
 
   const rule: RatingRule = { humanMin: human ?? undefined, botMin: bot ?? undefined };
   setRatingRule(channelId, rule);
-  await interaction.reply(
-    `Rating filter set - I'll only show ${describeRule(rule)} here. Everything else is hidden, ` +
+  await interaction.reply({
+    content:
+      `Rating filter set - I'll only show ${describeRule(rule)} here. Everything else is hidden, ` +
       'overriding /showbots and the /announce mode (quiet still silences the channel entirely).',
-  );
+    flags: MessageFlags.Ephemeral,
+  });
 }

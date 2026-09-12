@@ -55,7 +55,7 @@ separate instance, not a second server on the same process):
   `/announce` (`showBotsStore.ts`) so it survives that being off. When
   off, any game with a confirmed bot on either side is dropped from
   game-started notices. Bot *seeks* were already never announced, so
-  this only affects game notices.
+  this only affects game notices. Replies privately.
 - `/rating human:<n> bot:<n>` — a standing per-channel filter
   (`ratingStore.ts`): when set, it's the authoritative gate for game
   notices — only games featuring a registered human rated at least
@@ -66,7 +66,29 @@ separate instance, not a second server on the same process):
   deliberately does *not* beat `quiet`, which means "no game notices here
   at all". Unknown ratings fail the bounds (hide), including the
   first-minute window after a restart before the ratings list loads.
-  `/rating off` clears it.
+  `/rating off` clears it. Replies privately.
+- `/prune duplicates|threads|messages` — manual, on-demand cleanup of a
+  channel's own bot messages/threads. `duplicates` collapses repeat watch
+  threads for the same game down to one, skipping (and reporting) any set
+  with human chat in it. `threads` removes watch threads that no longer
+  match the channel's current `/announce`/`/showbots`/`/rating` settings,
+  plus any over a day old that nobody ever chatted in. `messages` removes
+  channel messages that no longer match those settings, plus game notices
+  whose thread is gone (also a day old). Live games are never touched.
+  Requires Manage Channels; refuses to run until PlayTak's rating list has
+  loaded at least once since the last restart, since a `/rating` rule
+  can't be checked before then and deletion isn't reversible. Replies
+  privately, including its progress heartbeat on a long run.
+- Stale notices and threads are also cleaned up **automatically and
+  silently**, independent of `/prune` above (`playtak/autoPrune.ts`, no
+  slash command of its own): roughly every 30 minutes, in every channel
+  that's ever had `/announce` configured, a game-started/finished notice
+  over a day old is removed if its thread no longer exists, or removed
+  along with its thread if that thread exists but no human ever posted in
+  it. Unlike `/prune`, this never re-checks a notice against the
+  channel's *current* settings and never posts anything about what it
+  did — it only ever removes things nobody engaged with, without adding
+  any channel noise of its own.
 - `/help` — full explanation of every command and its aliases (Discord
   caps a command's own description at 100 characters, so this is the
   fuller version). Keep the per-command lines here terse.
@@ -104,7 +126,23 @@ separate instance, not a second server on the same process):
   being watched gets the moves it missed while disconnected drawn inline
   (board-per-move) when the gap is ≤10 plies, or posted as
   /expand-fillable chunk summaries plus one current-position board when
-  it's larger - `WatchState.historyMode`'s `'reconnect'` case.
+  it's larger - `WatchState.historyMode`'s `'reconnect'` case. A finished
+  game's thread is warned, then archived+locked 24h later
+  (`scheduleClose()`/`closeThread()`); the warning message's own embedded
+  timestamp is the durable record of that deadline (`findCloseMarker()`
+  checks whether it's actually passed, not just whether a warning exists),
+  which is what lets the periodic sweep close a thread correctly even
+  across a restart or after it reopens from renewed chat, without
+  archiving early or looping on a re-warn.
+- `src/playtak/pruneRules.ts` — staleness-scanning primitives (the stale-
+  age threshold, "does a real thread exist for this notice's game", "has a
+  human ever posted in this thread") shared by the manual `/prune` command
+  and the silent automatic sweep below, so the two don't each reimplement
+  the same paginated Discord API scanning.
+- `src/playtak/autoPrune.ts` — the automatic counterpart to `/prune`
+  described above: runs on its own timer, scoped to every channel with
+  `/announce` ever configured (read from `announceStore.ts`), entirely
+  silently.
 - `src/playtak/catchup.ts` — the chunk-summary vocabulary shared by
   `watcher.ts` (which posts them) and `commands/expand.ts` (which fills
   them). The design insight that unshelved `/expand`: Discord can't insert
@@ -188,4 +226,8 @@ invent new bot features unprompted. Known open items:
 2. When ready, bring the bot to the Tak Talk Discord server.
 3. Test `/expand here`/`/expand new` and the new catch-up behavior (inline
    boards for small reconnect gaps, chunked summaries otherwise) on the
+   private test server.
+4. Test the corrected thread close/archive behavior (no more archiving a
+   game's thread within minutes of it ending, no more repeat "appears to
+   have ended" spam) and the new silent automatic prune sweep, both on the
    private test server.

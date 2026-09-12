@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, PermissionFlagsBits } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, PermissionFlagsBits, MessageFlags } from 'discord.js';
 import { getShowBots, setShowBots } from '../playtak/showBotsStore';
 
 export const data = new SlashCommandBuilder()
@@ -19,15 +19,19 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   if (!state) {
     const shown = getShowBots(channelId);
-    await interaction.reply(`Bot games are currently **${shown ? 'shown' : 'hidden'}** in this channel.`);
+    await interaction.reply({
+      content: `Bot games are currently **${shown ? 'shown' : 'hidden'}** in this channel.`,
+      flags: MessageFlags.Ephemeral,
+    });
     return;
   }
 
   const show = state === 'on';
   setShowBots(channelId, show);
-  await interaction.reply(
-    show
+  await interaction.reply({
+    content: show
       ? 'Bot games will now be **shown** here, same as human games.'
       : 'Bot games are now **hidden** here - only human-vs-human games will get seek and game-started announcements.',
-  );
+    flags: MessageFlags.Ephemeral,
+  });
 }

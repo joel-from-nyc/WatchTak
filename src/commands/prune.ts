@@ -1,9 +1,25 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, PermissionFlagsBits, TextChannel, ThreadChannel } from 'discord.js';
+import {
+  SlashCommandBuilder,
+  ChatInputCommandInteraction,
+  PermissionFlagsBits,
+  TextChannel,
+  ThreadChannel,
+  MessageFlags,
+} from 'discord.js';
 import { wouldGameNoticeBeAllowed, isTrackedSeekMessage } from '../playtak/announcer';
 import { isTrackedGameMessage } from '../playtak/seekToGame';
 import { isGameActivelyWatched, getWatchedThread, parseThreadName } from '../playtak/watcher';
 import { areRatingsLoaded } from '../playtak/ratings';
-import { getGameRegistry } from '../playtak/shared';
+import {
+  parseNoticeLine,
+  STALE_AGE_MS,
+  isGameStillLive,
+  collectChannelThreads,
+  mapThreadsByGameNo,
+  threadHasHumanMessages,
+  MAX_MESSAGE_PAGES,
+  MESSAGE_PAGE_SIZE,
+} from '../playtak/pruneRules';
 
 export const data = new SlashCommandBuilder()
   .setName('prune')
@@ -21,19 +37,6 @@ export const data = new SlashCommandBuilder()
   )
   // Same default as /announce, /showbots, /rating - Manage Channels.
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels);
-
-// Matches the first line of both notice shapes seekToGame.ts builds -
-// "X vs Y (#123) has started!" / "X vs Y (#123) has finished." - loosely
-// enough to survive either verb, tightly enough that nothing else in the
-// channel accidentally matches. Player names never contain spaces (PlayTak
-// usernames are single wire tokens), so splitting on " vs " is unambiguous.
-// The game number is captured too, for the orphaned-notice check below.
-const NOTICE_LINE_PATTERN = /^(.+?) vs (.+?) \(#(\d+)\) has (?:started!|finished\.)$/;
-
-// Reverses formatPlayerBold()'s "**name**" / "**name** (rating)" shape back
-// to the bare name - that function is the only place that builds this exact
-// shape, so the pattern is stable.
-const BOLD_NAME_PATTERN = /^\*\*(.+)\*\*(?: \(\d+\))?$/;
 
 // /ping, /list, and /seeks now reply ephemerally (see ping.ts/list.ts/
 // seeks.ts), so any surviving *public* reply from one of them predates that
@@ -59,46 +62,6 @@ function isStaleEphemeralReply(content: string): boolean {
   return GAMES_REPLY_LINE_PATTERN.test(firstLine) || SEEKS_REPLY_LINE_PATTERN.test(firstLine);
 }
 
-function extractName(rawBoldName: string): string | undefined {
-  return BOLD_NAME_PATTERN.exec(rawBoldName)?.[1];
-}
-
-// One command run scans at most this many messages (10 pages of Discord's own
-// 100-per-fetch cap) - enough for a realistic backscroll without an
-// open-ended API scan.
-const MAX_MESSAGE_PAGES = 10;
-const MESSAGE_PAGE_SIZE = 100;
-
-// Threads accumulate far more slowly than messages, so a much smaller cap
-// (5 pages of 100 archived threads) comfortably covers a realistic amount of
-// game history without an open-ended scan.
-const MAX_THREAD_PAGES = 5;
-const THREAD_PAGE_SIZE = 100;
-
-// How many pages of a single thread's own messages to check for human
-// participation before giving up and assuming there isn't any - a real
-// conversation could be anywhere among the bot's own move-by-move posts, so
-// this needs to be generous, but still bounded (500 messages is far more
-// than any of these threads realistically carries).
-const MAX_HUMAN_CHECK_PAGES = 5;
-
-// "Older than a day" threshold for the staleness/orphan checks below - a
-// separate concern from watcher.ts's own THREAD_CLOSE_DELAY_MS (which
-// happens to share the same value), not worth sharing between the two files.
-const STALE_AGE_MS = 24 * 60 * 60 * 1000;
-
-// isGameActivelyWatched() is wiped by a process restart (in-memory only) -
-// harmless for the existing rule-mismatch criteria below, since a channel's
-// settings changing is independent of restarts, but the staleness/orphan
-// criteria have no such incidental protection: a genuinely live game whose
-// thread happens to have no chat yet, hit right after a restart, would
-// otherwise look identical to an abandoned one. The game registry survives a
-// restart (PlayTak replays the whole active game list on reconnect - see
-// registry.ts), so checking it too closes that gap.
-function isGameStillLive(gameNo: number): boolean {
-  return isGameActivelyWatched(gameNo) || getGameRegistry().find(gameNo) !== undefined;
-}
-
 // `totalMessageSent` is the uncapped lifetime count; `messageCount` stops
 // incrementing past 50 and is only a fallback for a thread old enough that
 // Discord hasn't backfilled the newer field.
@@ -106,68 +69,21 @@ function threadMessageCount(thread: ThreadChannel): number {
   return thread.totalMessageSent ?? thread.messageCount ?? 0;
 }
 
-// Whether any human has ever posted in this thread. `author.bot` is
-// Discord's own flag for a bot/application account, so this correctly
-// excludes both this bot's own move-by-move posts and anything any other bot
-// might have said - only a genuine human message counts.
-async function threadHasHumanMessages(thread: ThreadChannel): Promise<boolean> {
-  let before: string | undefined;
-  for (let page = 0; page < MAX_HUMAN_CHECK_PAGES; page++) {
-    const batch = await thread.messages.fetch({ limit: 100, before }).catch(() => null);
-    if (!batch || batch.size === 0) break;
-    for (const message of batch.values()) {
-      if (!message.author.bot) return true;
-    }
-    before = batch.last()?.id;
-    if (batch.size < 100) break;
-  }
-  return false;
-}
-
-// This channel's own threads, active plus a bounded page of archived ones -
-// shared by all three subcommands. `complete` is false whenever a fetch
-// failed, or the archived list still had more pages past MAX_THREAD_PAGES -
-// the messages subcommand's orphaned-notice check (see pruneMessages())
-// needs to know this, since it reads "no thread found here" as "no thread
-// exists", which is only safe to conclude from a scan that covered
-// everything.
-async function collectChannelThreads(channel: TextChannel): Promise<{ threads: ThreadChannel[]; complete: boolean }> {
-  const threads: ThreadChannel[] = [];
-  let complete = true;
-
-  const active = await channel.threads.fetchActive().catch(() => null);
-  if (active) threads.push(...active.threads.values());
-  else complete = false;
-
-  let before: ThreadChannel | undefined;
-  for (let page = 0; page < MAX_THREAD_PAGES; page++) {
-    const archived = await channel.threads.fetchArchived({ limit: THREAD_PAGE_SIZE, before }).catch(() => null);
-    if (!archived) {
-      complete = false;
-      break;
-    }
-    if (archived.threads.size === 0) break;
-    threads.push(...archived.threads.values());
-    before = archived.threads.last();
-    if (!archived.hasMore) break;
-    if (page === MAX_THREAD_PAGES - 1) complete = false;
-  }
-  return { threads, complete };
-}
-
-// Shared scaffolding for all three subcommands: defers, posts a "still
-// working" heartbeat every 60s (Discord's individual, non-bulk deletion is
-// throttled hard enough that a big backscroll can take many minutes - see
-// the /prune run that once left "thinking..." showing for a long time), and
-// guards every reply (including the final one) with .catch() so a deferred
-// interaction's 15-minute webhook-token expiry can't throw an unhandled
-// rejection - the work itself was never gated on the reply succeeding.
+// Shared scaffolding for all three subcommands: defers ephemerally (so the
+// progress heartbeat and final summary are visible only to whoever ran the
+// command, not the whole channel), posts a "still working" heartbeat every
+// 60s (Discord's individual, non-bulk deletion is throttled hard enough that
+// a big backscroll can take many minutes - see the /prune run that once left
+// "thinking..." showing for a long time), and guards every reply (including
+// the final one) with .catch() so a deferred interaction's 15-minute
+// webhook-token expiry can't throw an unhandled rejection - the work itself
+// was never gated on the reply succeeding.
 async function runWithProgress(
   interaction: ChatInputCommandInteraction,
   progressText: () => string,
   work: () => Promise<string>,
 ): Promise<void> {
-  await interaction.deferReply();
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const timer = setInterval(() => {
     interaction.editReply(progressText()).catch(() => {});
@@ -207,12 +123,7 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
       // orphaned notice (its thread is gone) from a live one.
       const { threads: channelThreads, complete: threadScanComplete } = await collectChannelThreads(channel);
       stats.orphanCheckSkipped = !threadScanComplete;
-      const threadGameNumbers = new Set<number>();
-      for (const thread of channelThreads) {
-        if (thread.ownerId !== botId) continue;
-        const parsed = parseThreadName(thread.name);
-        if (parsed) threadGameNumbers.add(parsed.gameNo);
-      }
+      const threadGameNumbers = new Set(mapThreadsByGameNo(channelThreads, botId).keys());
 
       let beforeId: string | undefined;
 
@@ -231,13 +142,9 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
           }
 
           const firstLine = message.content.split('\n', 1)[0];
-          const match = NOTICE_LINE_PATTERN.exec(firstLine);
-          if (!match) continue;
-
-          const white = extractName(match[1]);
-          const black = extractName(match[2]);
-          if (white === undefined || black === undefined) continue;
-          const gameNo = Number(match[3]);
+          const notice = parseNoticeLine(firstLine);
+          if (!notice) continue;
+          const { white, black, gameNo } = notice;
 
           // Still live - leave it for the game to finish naturally rather
           // than risk deleting something announcer.ts/seekToGame.ts track.
@@ -409,7 +316,7 @@ async function pruneDuplicates(interaction: ChatInputCommandInteraction, channel
 
 export async function execute(interaction: ChatInputCommandInteraction) {
   if (!(interaction.channel instanceof TextChannel)) {
-    await interaction.reply({ content: 'This only works in a text channel.', ephemeral: true });
+    await interaction.reply({ content: 'This only works in a text channel.', flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -427,7 +334,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
         "PlayTak's rating list hasn't finished loading since the bot last restarted, so /rating rules can't be " +
         'checked yet - running /prune right now could delete things a rating rule should protect. Wait a ' +
         'minute or two and try again.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
