@@ -52,7 +52,11 @@ separate instance, not a second server on the same process):
   database, since it's just a handful of channel ids); on startup the bot
   resumes announcing in any channel that was on, and on a graceful stop
   (`SIGINT`/`SIGTERM`) it deletes the "now on" confirmation message in
-  each one first, since it's stale the instant the bot goes down.
+  each one first, since it's stale the instant the bot goes down. That
+  "now on" confirmation is the only public reply `/announce` makes -
+  status checks, "already on/off", mode switches, and "now off" are all
+  ephemeral, since they're point-in-time statements that would otherwise
+  pile up in the channel.
 - `/showbots <on|off>` — per-channel, persisted independently of
   `/announce` (`showBotsStore.ts`) so it survives that being off. When
   off, any game with a confirmed bot on either side is dropped from
@@ -78,11 +82,13 @@ separate instance, not a second server on the same process):
   replay threads included). `messages` removes
   channel messages that no longer match those settings, game notices and
   Discord's own "started a thread" lines whose thread is gone (also a day
-  old), and any public reply from a command that now replies privately
+  old), any public reply from a command that now replies privately
   (identified by the command name Discord records on every slash-command
   reply — `message.interaction.commandName` — against the
-  `NOW_EPHEMERAL_COMMANDS` set in `prune.ts`; `/announce` and `/watch`
-  replies are public by design and stay). Live games are never touched.
+  `NOW_EPHEMERAL_COMMANDS` set in `prune.ts`), every `/announce` reply
+  except the channel's tracked "now on" banner, and `/watch`'s public
+  "Spectate: <#thread>" links once their thread is gone (they render as
+  "#unknown" by then). Live games are never touched.
   Requires Manage Channels; refuses to run until PlayTak's rating list has
   loaded at least once since the last restart, since a `/rating` rule
   can't be checked before then and deletion isn't reversible. Replies
