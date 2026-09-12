@@ -7,7 +7,7 @@ const COMMANDS = [
   '**/ping** - Bot health check. Replies with round-trip latency.',
   '**/list** - Lists PlayTak games currently in progress.',
   '**/watch <PlayTakGame#>** or **<player_name>** (also **/spectate**) - Follows a live PlayTak game in a thread. ' +
-    'Partial name matches work.',
+    'Pick from the list that appears as you type, or type a partial name.',
   '**/expand here** or **new** - Use this inside a game thread to draw the boards and "catch-up" on any missed ' +
     'moves from before the thread started. Either in an existing thread or a new one.',
   '**/seeks** - Lists open public seeks on PlayTak',

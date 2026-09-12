@@ -1,4 +1,12 @@
-import { Client, GatewayIntentBits, Collection, ChatInputCommandInteraction, TextChannel, MessageFlags } from 'discord.js';
+import {
+  Client,
+  GatewayIntentBits,
+  Collection,
+  ChatInputCommandInteraction,
+  AutocompleteInteraction,
+  TextChannel,
+  MessageFlags,
+} from 'discord.js';
 import dotenv from 'dotenv';
 import * as ping from './commands/ping';
 import * as list from './commands/list';
@@ -54,6 +62,9 @@ process.on('unhandledRejection', (reason) => {
 interface Command {
   data: { name: string };
   execute: (interaction: ChatInputCommandInteraction) => Promise<void>;
+  // Only the commands with an autocompleting option define this - see
+  // watch.ts.
+  autocomplete?: (interaction: AutocompleteInteraction) => Promise<void>;
 }
 
 const commands = new Collection<string, Command>();
@@ -89,6 +100,16 @@ const REVIEW_BUTTON_PATTERN = /^watch-review:(\d+)$/;
 
 client.on('interactionCreate', async (interaction) => {
   try {
+    // Fires repeatedly while someone types an autocompleting option, and
+    // must be answered within 3 seconds. Handled before the command branch
+    // below because it is emitted as its own interaction type, not as a
+    // command invocation.
+    if (interaction.isAutocomplete()) {
+      const command = commands.get(interaction.commandName);
+      await command?.autocomplete?.(interaction);
+      return;
+    }
+
     if (interaction.isChatInputCommand()) {
       const command = commands.get(interaction.commandName);
       if (!command) return;

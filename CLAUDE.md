@@ -21,7 +21,13 @@ separate instance, not a second server on the same process):
   archiving the thread 24 hours later. `<game>` accepts a game ID or a
   partial player name - matched anywhere in the name, not just the start -
   (ambiguous matches ask the user to be more specific); with no argument
-  it behaves like `/list`.
+  it behaves like `/list`. The `game` option autocompletes from the live
+  registry as you type (`watch.ts`'s `autocomplete()`, routed by
+  `index.ts`'s `isAutocomplete()` branch): each row shows both players
+  with ratings plus board size and time control, and the value submitted
+  is the game number, so picking from the dropdown always takes the
+  unambiguous path. `/spectate` declares the same option - autocomplete
+  is per-registration, not inherited from the shared `execute`.
 - `/expand here|new` — run inside a game thread. Catch-up summaries
   (posted when a thread starts mid-game, or after a reconnect gap of more
   than 10 plies) are "Moves 3W-7B" chunk messages of ≤10 plies each, sized
