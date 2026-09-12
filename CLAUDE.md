@@ -74,7 +74,8 @@ separate instance, not a second server on the same process):
   match the channel's current `/announce`/`/showbots`/`/rating` settings,
   plus any over a day old that nobody ever chatted in. `messages` removes
   channel messages that no longer match those settings, plus game notices
-  whose thread is gone (also a day old). Live games are never touched.
+  and Discord's own "started a thread" lines whose thread is gone (also a
+  day old). Live games are never touched.
   Requires Manage Channels; refuses to run until PlayTak's rating list has
   loaded at least once since the last restart, since a `/rating` rule
   can't be checked before then and deletion isn't reversible. Replies
@@ -88,7 +89,13 @@ separate instance, not a second server on the same process):
   it. Unlike `/prune`, this never re-checks a notice against the
   channel's *current* settings and never posts anything about what it
   did — it only ever removes things nobody engaged with, without adding
-  any channel noise of its own.
+  any channel noise of its own. Two details both pruners share
+  (`pruneRules.ts`): a notice from before the game number was part of the
+  text is identified by its Watch/Review button's customId instead, and
+  Discord's "started a thread" system line — whose message id *is* the
+  thread's id, and which Discord does not remove when the thread is
+  deleted — is removed along with any thread the pruners delete, and
+  cleaned up on its own whenever its thread is found to be gone.
 - `/help` — full explanation of every command and its aliases (Discord
   caps a command's own description at 100 characters, so this is the
   fuller version). Keep the per-command lines here terse.

@@ -34,8 +34,9 @@ const MOD_COMMANDS = [
   "**/prune threads** - Removes watch threads that no longer match this channel's current /announce/showbots/" +
     'rating settings, plus threads nobody ever chatted in that are over a day old. Live games are never touched; ' +
     'removed threads with human messages are flagged.',
-  '**/prune messages** - Removes channel messages that no longer match current rules, game notices whose thread ' +
-    'is gone (over a day old), plus old public /ping, /list, or /seeks replies (now private-only).',
+  '**/prune messages** - Removes channel messages that no longer match current rules, game notices and ' +
+    '"started a thread" lines whose thread is gone (over a day old), plus old public /ping, /list, or /seeks ' +
+    'replies (now private-only).',
 ];
 
 // Discord rejects any single message body over 2000 characters. Each labeled

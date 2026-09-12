@@ -11,7 +11,9 @@ import { isTrackedGameMessage } from '../playtak/seekToGame';
 import { isGameActivelyWatched, getWatchedThread, parseThreadName } from '../playtak/watcher';
 import { areRatingsLoaded } from '../playtak/ratings';
 import {
-  parseNoticeLine,
+  parseNotice,
+  isThreadStarterMessage,
+  deleteThread,
   STALE_AGE_MS,
   isGameStillLive,
   collectChannelThreads,
@@ -136,6 +138,7 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
       const { threads: channelThreads, complete: threadScanComplete } = await collectChannelThreads(channel);
       stats.orphanCheckSkipped = !threadScanComplete;
       const threadGameNumbers = new Set(mapThreadsByGameNo(channelThreads, botId).keys());
+      const threadIds = new Set(channelThreads.map((thread) => thread.id));
 
       let beforeId: string | undefined;
 
@@ -152,8 +155,22 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
             continue;
           }
 
-          const firstLine = message.content.split('\n', 1)[0];
-          const notice = parseNoticeLine(firstLine);
+          // Discord's "started a thread" line for a thread that no longer
+          // exists - subject to the same "only a complete scan can say a
+          // thread is gone" rule as the orphaned-notice check below, and the
+          // same day-old threshold, so a thread created moments after the
+          // scan can't lose its line to a race.
+          if (isThreadStarterMessage(message, botId)) {
+            const orphanedStarter =
+              threadScanComplete && Date.now() - message.createdTimestamp > STALE_AGE_MS && !threadIds.has(message.id);
+            if (orphanedStarter && (await tryDelete(message))) {
+              stats.removed++;
+              stats.removedOrphaned++;
+            }
+            continue;
+          }
+
+          const notice = parseNotice(message);
           if (!notice) continue;
           const { white, black, gameNo } = notice;
 
@@ -187,7 +204,8 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
         ? ' (Skipped checking for notices with a missing thread this run - this channel has more archived threads ' +
           "than one pass covers, so a thread's absence couldn't be confirmed safely.)"
         : stats.removedOrphaned > 0
-          ? ` ${stats.removedOrphaned} of those were game notices whose thread could no longer be found, over a day old.`
+          ? ` ${stats.removedOrphaned} of those were game notices or "started a thread" lines whose thread could no ` +
+            'longer be found, over a day old.'
           : '';
       return (
         `Scanned ${stats.scanned} message${stats.scanned === 1 ? '' : 's'}, removed ${stats.removed} that wouldn't ` +
@@ -243,7 +261,7 @@ async function pruneThreads(interaction: ChatInputCommandInteraction, channel: T
         // removed; this just makes sure that isn't lost silently. A stale
         // thread, by definition, never has human messages, so there's
         // nothing to report there beyond the count.
-        if (!(await tryDelete(thread))) continue;
+        if (!(await deleteThread(thread))) continue;
         stats.removed++;
         if (ruleMismatch) {
           if (hadHumans) stats.removedWithHumans.push(thread.name);
@@ -310,7 +328,7 @@ async function pruneDuplicates(interaction: ChatInputCommandInteraction, channel
 
         for (const thread of threads) {
           if (thread.id === keeper.id) continue;
-          if (await tryDelete(thread)) stats.removed++;
+          if (await deleteThread(thread)) stats.removed++;
         }
       }
 
