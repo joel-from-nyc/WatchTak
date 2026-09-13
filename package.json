@@ -1,7 +1,13 @@
 {
-  "name": "discord-bot-poc",
+  "name": "watchtak",
   "version": "0.1.0",
-  "description": "Discord bot for the Tak board game / PlayTak.com community - browse seeks, list games, and watch a live game in a thread.",
+  "description": "A Discord bot for following PlayTak games",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joel-from-nyc/WatchTak.git"
+  },
   "main": "dist/index.js",
   "type": "commonjs",
   "engines": {
