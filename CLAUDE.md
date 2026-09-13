@@ -1,62 +1,17 @@
 # WatchTak
 
 A Discord bot (TypeScript, discord.js v14) that follows Tak games on
-PlayTak.com. See README.md for what it does, every command, and setup. This
-file covers what an agent or contributor needs to change it safely.
-
-## Architecture
-
-- One guest WebSocket connection to PlayTak (`src/playtak/client.ts`), created
-  once by `initPlaytak()` in `shared.ts`. Every feature subscribes to that
-  client's `event` stream; nothing opens a second connection.
-- `protocol.ts` parses PlayTak's line protocol into typed events. Field orders
-  follow the server source (`USTakAssociation/playtak-api`). The bot sends
-  `Protocol 2` before `Login Guest`; v2 adds a bot flag to seek lines,
-  reports an open seek's opponent as `"0"` (normalized to `''`), and sends
-  clock updates as `Game#<no> Timems` in milliseconds instead of `Time` in
-  seconds. The parser accepts both.
-- `registry.ts` / `seekRegistry.ts` are in-memory views of active games and
-  open seeks. PlayTak replays the full game and seek lists on every
-  (re)connect and never sends removals for anything that ended while the bot
-  was disconnected, so both reconcile against the replay ~2s after connect.
-- `watcher.ts` owns a watched game's thread: history replay on `Observe`,
-  live move posts, reconnect catch-up, and the periodic sweep that
-  reconciles every open thread against live state. Three helpers hang off
-  it: `lowTime.ts` (the low-time countdown), `threadClose.ts` (the 24h
-  close/archive lifecycle, driven by a marker message in the thread), and
-  `threadLookup.ts` (finding a game's thread and reading back what it
-  shows; thread names embed `(#<gameNo>)` for this).
-- `catchup.ts` defines the ≤10-ply "Moves 3W-7B" summary messages posted
-  when a thread starts mid-game. `/expand here` later edits board images onto
-  them (10 is Discord's per-message attachment cap).
-- `announcer.ts` runs `/announce`; `seekToGame.ts` matches a removed seek to
-  the game it became by player name within a 5s window, since the protocol
-  carries no link between the two.
-- `ratings.ts` polls `https://playtak.com/ratinglist.json` every 20 minutes.
-  The wire protocol carries no ratings. A rating of 0 means unrated. The
-  list's bot flag supplements bot detection from seek lines.
-- Pure modules (`protocol.ts`, `ptn.ts`, `format.ts`, `catchup.ts`,
-  `result.ts`, `jsonStore.ts`) have `*.test.ts` files beside them.
-- `gameArchive.ts` fetches finished games from
-  `https://api.playtak.com/v1/games-history/:id` for Review threads and
-  `/expand` on finished games. Move tokens match the live wire format.
-- `pruneRules.ts` holds the scanning/deletion primitives shared by `/prune`
-  and `autoPrune.ts`. Deletion batches through `bulkDelete`, falling back to
-  one-at-a-time for messages over two weeks old or when Manage Messages is
-  missing.
-- `announceStore.ts`, `showBotsStore.ts`, `ratingStore.ts` persist per-channel
-  settings through `jsonStore.ts`: one JSON file each in `data/` (or
-  `DATA_DIR`), namespaced by `DISCORD_GUILD_ID`, written atomically.
-- `boardImage.ts` renders boards with `tps-ninja` (native `canvas`). Wire komi
-  is in half-points; divide by 2 before rendering.
+PlayTak.com. Read [README.md](README.md) for what it does and how to run it,
+and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the modules fit
+together. This file is only what an agent needs to change the code safely.
 
 ## Conventions
 
+- Run `npm run check` (Prettier, build, tests) after any change. Strict
+  TypeScript is on; don't loosen it.
 - `shared.ts` owns the PlayTak singletons (connection, game registry, seek
-  registry); any module needing them calls its getters. The Discord client
-  is created in `index.ts` and passed to the `register*()` functions.
-- Strict TypeScript (`tsconfig.json`). Don't loosen it. Run `npm run check`
-  (Prettier, build, tests) after any change.
+  registry); modules read them through its getters. The Discord client is
+  created in `index.ts` and passed to the `register*()` functions.
 - One command per file in `src/commands/`, exporting `data` and `execute`
   (and `autocomplete` where an option autocompletes). Add new commands to
   the list in `src/commands/index.ts`; that both routes and registers them.
@@ -69,6 +24,8 @@ file covers what an agent or contributor needs to change it safely.
   thread link.
 - Timestamps use Discord `<t:...>` tags (viewer-local time). They don't
   render inside code blocks, so they go outside the fence.
+- Comments describe what the code does and any non-obvious fact it relies
+  on. No design rationale or history.
 - Secrets live in `.env` (gitignored). Never print or commit token values.
 
 ## Constraints
