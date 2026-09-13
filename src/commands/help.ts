@@ -1,8 +1,6 @@
 import { SlashCommandBuilder, ChatInputCommandInteraction, MessageFlags, PermissionFlagsBits } from 'discord.js';
 
-// Discord caps a command's own description at 100 characters, which isn't
-// enough to fully explain some of these - so /help has its own fuller,
-// hand-written text rather than reusing each command's `data.description`.
+// Fuller text than the 100-character command descriptions allow.
 const COMMANDS = [
   '**/ping** - Bot health check. Replies with round-trip latency.',
   '**/list** - Lists PlayTak games currently in progress.',
@@ -32,10 +30,8 @@ const MOD_COMMANDS = [
     'commands that now reply privately, and outdated /announce status replies.',
 ];
 
-// Discord rejects any single message body over 2000 characters. Each labeled
-// section is sent as its own message already comfortably under that, but
-// still packed/split defensively rather than assumed safe, so this can't
-// silently break again the next time a line is added.
+// Discord rejects messages over 2000 characters; each section is split to
+// stay under.
 const DISCORD_MESSAGE_LIMIT = 1900;
 
 function chunk(header: string, entries: string[]): string[] {
@@ -67,10 +63,8 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     await interaction.followUp({ content: chunk, flags: MessageFlags.Ephemeral });
   }
 
-  // Same permission /announce, /showbots, /rating, and /prune already
-  // require to run - checked directly rather than trusting the invite-time
-  // default, since a server's admins can loosen or tighten any command's
-  // permission per-server without this ever being redeployed to match.
+  // Checked live rather than trusting the registered default, since server
+  // admins can change any command's permission without a redeploy.
   const isMod = interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels) ?? false;
   if (!isMod) return;
 

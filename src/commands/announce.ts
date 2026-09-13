@@ -68,9 +68,7 @@ export const data = new SlashCommandBuilder()
         { name: 'users', value: 'users' },
       ),
   )
-  // Baseline default - members need Manage Channels to run this. A server's
-  // admins can further restrict it to specific roles (or loosen it) anytime
-  // via Server Settings -> Integrations -> this bot, with no redeploy needed.
+  // Server admins can adjust this per server under Integrations.
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels);
 
 function statusText(channelId: string): string {
@@ -78,11 +76,8 @@ function statusText(channelId: string): string {
   return MODE_STATUS[getAnnounceMode(channelId)];
 }
 
-// Every reply here is ephemeral except the "now on" confirmation: that one
-// is a live banner for the channel, tracked by announcer.ts and deleted
-// again on /announce off or a restart. The rest - status checks, "already
-// on/off", mode switches, "now off" - are point-in-time statements that
-// would otherwise pile up in the channel as permanent clutter.
+// Every reply is ephemeral except the "now on" confirmation, which stays as
+// a channel banner until /announce off or a restart deletes it.
 export async function execute(interaction: ChatInputCommandInteraction) {
   const state = interaction.options.getString('state');
 
@@ -99,25 +94,20 @@ export async function execute(interaction: ChatInputCommandInteraction) {
         await interaction.reply({ content: MODE_ALREADY_ON[mode], flags: MessageFlags.Ephemeral });
         return;
       }
-      // Switching mode on an already-active channel - just flip the flag,
-      // no need to touch the seek list itself.
       setAnnounceMode(interaction.channelId, mode);
       await interaction.reply({ content: MODE_SWITCHED_TO[mode], flags: MessageFlags.Ephemeral });
       return;
     }
 
-    // Posts one message per currently-open seek, so defer rather than risk
-    // blowing the 3s interaction deadline on a busy board.
+    // Turning on posts one message per open seek, which can exceed the 3s
+    // interaction deadline.
     await interaction.deferReply();
     await turnOnAnnounce(interaction.client, interaction.channelId, mode);
     const reply = await interaction.editReply(MODE_MESSAGES[mode]);
-    // Recorded so this message can be found and deleted later - it's stale
-    // the moment the bot restarts, since "now" no longer means now.
     recordConfirmationMessage(interaction.channelId, reply.id, mode);
     return;
   }
 
-  // state === 'off'
   if (!isAnnouncing(interaction.channelId)) {
     await interaction.reply({
       content: 'Seek announcements are already **off** in this channel.',

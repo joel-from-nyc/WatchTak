@@ -1,11 +1,6 @@
-// Result strings confirmed against server/src/main/java/tak/Game.java's
-// gameStateString(): R/F = road/flat win, bare 1-0/0-1 covers both
-// resignation and winning on time - confirmed against the server source
-// (Game.java's resign() sets the exact same game state a time-out does),
-// there's no separate signal for either on the wire. The winner is never in
-// doubt (a bare "1-0" always means white won, whichever way), only the
-// *reason* is unknown - so the score is shown alongside rather than
-// guessing at "resigned" or "timed out".
+// Result strings as sent by the server: R = road win, F = flat win. A bare
+// "1-0" / "0-1" covers both resignation and a win on time; the wire does not
+// distinguish them, so the score is shown as-is.
 export function describeResult(result: string, white: string, black: string): string {
   switch (result) {
     case '1/2-1/2':

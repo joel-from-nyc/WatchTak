@@ -18,55 +18,29 @@ import { fetchArchivedGame } from './gameArchive';
 import { getRating } from './ratings';
 import { getGameStartedAt } from './gameTimes';
 
-// How long to wait with no further place/spread messages before treating the
-// game as caught up to live play. On Observe, PlayTak immediately replays
-// the full move history as the same message shapes live moves use, with no
-// flag distinguishing "replay" from "live" - so a burst of moves arriving
-// right after Observe is treated as history (used to rebuild the board and
-// ply count, not announced), and live posting only starts once they've
-// stopped arriving for this long. Also armed immediately on Observe so a
-// brand-new game with zero history still goes live promptly.
+// On Observe, PlayTak replays the game's full move history using the same
+// message shapes as live moves. Moves are buffered as history until none has
+// arrived for this long; only then does live posting start.
 const HISTORY_SETTLE_MS = 500;
 
 const THREAD_CLOSE_DELAY_MS = 24 * 60 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 
-// Posted verbatim whenever a game-over is detected, whether live or by the
-// sweep, with the actual archive deadline embedded as a Discord relative
-// timestamp (see scheduleClose()). A thread's close-lifecycle post is either
-// this, or - once closeThread() has rewritten it in place - the
-// CLOSE_ARCHIVED_PREFIX text below; findCloseMarker() recognizes either
-// state, since the message needs to stay findable across that rewrite (see
-// its own comment for why that matters).
+// A finished game's thread carries one close-lifecycle message, in one of two
+// states: the pending warning (with a `<t:...:R>` deadline), or the archived
+// record closeThread() rewrites it into.
 const CLOSE_WARNING_PREFIX = 'This thread will be archived';
-
-// What closeThread() rewrites the warning message to once it actually
-// archives the thread - the countdown in the original post is no longer
-// useful once the event it counted down to has happened, so this replaces it
-// with a plain record of when that was.
 const CLOSE_ARCHIVED_PREFIX = 'This thread was archived on';
-
-// Matches a close-lifecycle post in either state - see the two prefixes
-// above and findCloseMarker().
 const CLOSE_MARKER_PATTERN = new RegExp(`^(?:${CLOSE_WARNING_PREFIX}|${CLOSE_ARCHIVED_PREFIX})`);
 
-// Recovers the Unix-seconds deadline embedded in a still-pending warning
-// (the `<t:...:R>` warningText() renders) - lets the close logic ask "is it
-// actually time yet?" instead of just "does a warning exist?", which used to
-// let the sweep archive a thread within one sweep interval of a game ending
-// instead of the intended 24h later.
+// Extracts the close deadline (Unix seconds) from a pending warning message.
 const CLOSE_WARNING_DEADLINE_PATTERN = /<t:(\d+):R>/;
 
-// reconcileClose() only rewrites a warning when the deadline it shows is off
-// by more than this. The deadline is derived from message timestamps, which
-// only move when something actually happens in the thread, so this just
-// absorbs second-level rounding rather than letting every sweep pass issue
-// a no-op edit.
+// A warning is only rewritten when its deadline moves by more than this.
 const CLOSE_DEADLINE_SLOP_MS = 60 * 1000;
 
-// Embedded in every thread's name so a restarted bot (with no memory of its
-// own) can recover which PlayTak game a thread belongs to just by reading
-// Discord's own thread list - see sweepThreads().
+// Every watch thread's name ends in "(#<gameNo>)", so threads can be matched
+// back to games from Discord's thread list alone after a restart.
 const THREAD_NAME_PATTERN = /\(#(\d+)\)$/;
 
 // A player is warned once their clock drops below this.
@@ -82,95 +56,58 @@ interface WatchState {
   incrementSeconds: number;
   plies: string[];
   live: boolean;
-  // Most recently known remaining time, from Game#<no> Time events.
-  // Undefined until the first one arrives.
+  // Remaining time from the most recent clock event; undefined until one arrives.
   whiteSeconds?: number;
   blackSeconds?: number;
   settleTimer?: NodeJS.Timeout;
-  // 'newThread': this is the first time anyone has watched this game, so the
-  // thread has no prior move history visible - post the full move list as
-  // /expand-fillable chunk summaries once caught up (see catchup.ts).
-  // 'reconnect': the thread already has moves up through `catchupFromPly`,
-  // so cover only what came after (the moves actually missed while
-  // disconnected) - drawn inline as boards when the gap is small, chunked
-  // like newThread when it isn't. 'resume': a sweep match where
-  // sweepThreads() couldn't work out what the thread already shows (see
-  // findKnownPlyCount()) - skip the catch-up entirely rather than guess.
+  // What to post once the history replay settles:
+  //   'newThread' - the full history as chunk summaries plus the current board.
+  //   'reconnect' - only the moves after `catchupFromPly`, which the thread
+  //                 already shows: drawn inline for small gaps, chunked otherwise.
+  //   'resume'    - the thread's existing content is unknown; post the current
+  //                 board only.
   historyMode: 'newThread' | 'reconnect' | 'resume';
-  // Only meaningful when historyMode is 'reconnect' - the ply count the
-  // thread already had text for before the disconnect (or, for a sweep
-  // resume, before the restart - see findKnownPlyCount()).
+  // Ply count the thread already shows ('reconnect' mode only).
   catchupFromPly?: number;
-  // Set while a "running low on time" post is showing a live countdown for
-  // the player currently to move. Only one can ever be relevant at a time,
-  // since the side not to move has a frozen clock. Cleared (and the message
-  // edited to a static line) the moment anything makes the countdown stale -
-  // a move landing, an undo, or the game ending - see resolveLowTimeWarning().
+  // The live low-time countdown message, if one is showing. Only the player
+  // on the clock can have one. Cleared by resolveLowTimeWarning().
   lowTimeWarning?: { message: Message; color: 'white' | 'black' };
-  // Pending timer that will post the warning when the player on the clock
-  // crosses the threshold mid-think - see scheduleLowTimeWarning().
+  // Fires when the player on the clock crosses the threshold.
   lowTimeTimer?: NodeJS.Timeout;
-  // Bumped by resolveLowTimeWarning() every time something (a move, an undo,
-  // the game ending) invalidates whatever low-time attempt is currently in
-  // flight - lets postLowTimeWarning() detect that it went stale while its
-  // `.send()` was still pending. See postLowTimeWarning() for why this is
-  // needed. Undefined is treated as 0.
+  // Incremented each time a warning is resolved, so a warning whose send was
+  // still in flight at that moment can detect it is already stale.
   lowTimeGeneration?: number;
-  // Whether the resolution that produced the current lowTimeGeneration was
-  // caused by the warned-about player's own move landing (as opposed to an
-  // undo or the game ending some other way) - see resolveLowTimeWarning()
-  // and staleWarningText() for why this changes what time gets displayed.
+  // Whether the last resolution was caused by the warned player's own move
+  // (which affects the clock value shown - see staleWarningText()).
   lastResolutionAfterMove?: boolean;
-  // A /expand new replay thread that has caught up on history and now
-  // mirrors this game live: move posts, undo posts, reconnect catch-ups,
-  // and the game-over announcement are duplicated into it (low-time
-  // countdowns are not - they're edited-in-place messages, not worth
-  // duplicate timer plumbing). In-memory only, deliberately: the replay
-  // thread's name doesn't match THREAD_NAME_PATTERN, so after a restart
-  // nothing re-adopts it - it just goes quiet and Discord's 24h inactivity
-  // auto-archive retires it.
+  // A /expand new replay thread receiving a copy of every post. In-memory
+  // only; a restart drops the link.
   mirrorThread?: ThreadChannel;
 }
 
-// One bot instance only ever lives in one Discord server, so a game is only
-// ever watched from one place - keyed by PlayTak game number alone.
+// Keyed by PlayTak game number. One bot instance serves one Discord server,
+// so a game is only ever watched in one thread.
 const activeWatches = new Map<number, WatchState>();
 
-// Guards watchGame() against creating two threads for the same game: without
-// this, two near-simultaneous calls for the same gameNo (e.g. two people
-// clicking "Watch game" at almost the same moment) would both see nothing in
-// `activeWatches` yet (it's only set once thread creation finishes) and both
-// go on to create a thread. A second caller instead awaits the first's
-// in-flight promise and gets the same thread back - see watchGame().
+// Thread creation in progress per game, so two simultaneous watch requests
+// share one thread instead of each creating their own.
 const inFlightWatches = new Map<number, Promise<{ thread: ThreadChannel; alreadyWatching: boolean }>>();
-
-// Same dedup guard as inFlightWatches, for reconstructThread() (the Review
-// path) instead of watchGame().
 const inFlightReconstructs = new Map<number, Promise<ThreadChannel | undefined>>();
 
-// Threads this process has opened, kept keyed by game number even after the
-// game ends and its watch is torn down, so a "Review" link can still point at
-// the thread afterwards (see seekToGame.ts). Bounded by how many games this
-// process watched, and deliberately not persisted - after a restart there's
-// no live notice left to relink anyway.
+// Every thread this process has opened, kept after the game ends so a
+// finished game's notice can still link to it. Not persisted.
 const watchedThreads = new Map<number, ThreadChannel>();
 
 export function getWatchedThread(gameNo: number): ThreadChannel | undefined {
   return watchedThreads.get(gameNo);
 }
 
-// Whether this game's watch is still live right now - used by /prune to
-// avoid deleting the thread for a game that's still actually being played/
-// watched, even if it no longer matches current rules (mirrors the same
-// "skip live" carve-out /prune already applies to message notices).
 export function isGameActivelyWatched(gameNo: number): boolean {
   return activeWatches.has(gameNo);
 }
 
-// A read-only copy of an actively watched game's position for /expand -
-// plies is a snapshot, not the live array, and `live` is false while a
-// history replay is still settling (meaning the plies aren't yet known to
-// be complete). The WatchState itself stays private to this module.
+// Read-only copy of a watched game's position. `plies` is a snapshot, and
+// `live` is false while a history replay is still settling.
 export interface WatchSnapshot {
   plies: string[];
   boardSize: number;
@@ -193,11 +130,8 @@ export function getActiveWatchSnapshot(gameNo: number): WatchSnapshot | undefine
   };
 }
 
-// Attaches a /expand new replay thread as this game's live mirror (see
-// WatchState.mirrorThread). Refuses - returning false - if the game isn't
-// actively watched anymore (it just ended, or was never live) or already
-// has a mirror, so a caller can tell its caught-up replay won't be followed
-// by live moves.
+// Attaches a replay thread as the game's live mirror. Returns false if the
+// game is not actively watched or already has a mirror.
 export function attachMirrorThread(gameNo: number, thread: ThreadChannel): boolean {
   const state = activeWatches.get(gameNo);
   if (!state || state.mirrorThread) return false;
@@ -209,10 +143,8 @@ function threadName(white: string, black: string, gameNo: number): string {
   return `${white} vs ${black} (#${gameNo})`;
 }
 
-// Reverses threadName() - "White vs Black (#123)". Player names never
-// contain spaces (PlayTak usernames are single wire tokens), so splitting on
-// " vs " is unambiguous. Exported for /prune to recover the players a thread
-// was created for from its name alone.
+// Reverses threadName(). PlayTak usernames contain no spaces, so " vs " is an
+// unambiguous separator.
 export function parseThreadName(name: string): { white: string; black: string; gameNo: number } | undefined {
   const match = /^(.+) vs (.+) \(#(\d+)\)$/.exec(name);
   if (!match) return undefined;
@@ -226,9 +158,7 @@ function formatSeconds(totalSeconds: number): string {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
-// "White Time"/"Black Time" lines, or none at all if remaining time isn't
-// known yet - shared by every message kind that shows the clock (move,
-// current position).
+// "White Time"/"Black Time" lines, or none if the clocks are not known yet.
 function timeLines(state: WatchState): string[] {
   if (state.whiteSeconds === undefined || state.blackSeconds === undefined) return [];
   return [
@@ -237,13 +167,8 @@ function timeLines(state: WatchState): string[] {
   ];
 }
 
-// Text for "this ply was just played" - used both when a move actually just
-// arrived live, and to redescribe the new current position after an undo
-// (see the gameUndo handling below), since from the thread's perspective the
-// ply now on top of `state.plies` reads the same either way. The "Move"
-// line's value starts with the bare "<number><W/B>" - findKnownPlyCount()/
-// MOVE_LINE_PATTERN depend on that prefix to recover ply counts from thread
-// history after a cold restart.
+// A move post. The "Move:" line starts with "<number><W|B>", which
+// findKnownPlyCount() parses back out of thread history after a restart.
 function moveText(state: WatchState, ply: number, ptn: string): string {
   const isWhite = ply % 2 === 0;
   const moveNumber = Math.floor(ply / 2) + 1;
@@ -255,28 +180,13 @@ function moveText(state: WatchState, ply: number, ptn: string): string {
   return codeBlock(lines);
 }
 
-// Text for a bare "here's the board" post with no specific move attached -
-// the very first board of a game, or the state after an undo empties the ply
-// list entirely.
+// A board post with no specific move: the first board of a game, or the
+// position after an undo empties the ply list.
 function currentPositionText(state: WatchState): string {
   const time = timeLines(state);
   return codeBlock(time.length > 0 ? ['Current position', '', ...time] : ['Current position']);
 }
 
-// Thread-opening text - watchGame() and reconstructThread() both use this.
-// Uses its own tight local label width (Board/Time/Komi/Type are all short)
-// rather than MOVE_LABEL_WIDTH, since this block only ever appears once and
-// stretching it to match move messages would just look sparse. `note` is an
-// optional extra line for reconstructThread()'s "not watched live"
-// disclosure.
-// Player names arrive already rendered with their ratings (see
-// formatPlayerName()) - this is the one place inside a watch thread that shows
-// them, since repeating a rating on every move line would just add noise.
-//
-// `startedAtMs` is appended *after* the code block rather than as another
-// aligned row, because Discord doesn't render `<t:...>` timestamps inside a
-// fence - same reason the ptn.ninja link sits outside its block. Omitted
-// entirely when the start time isn't known (see gameTimes.ts).
 interface WatchStartOptions {
   white: string;
   black: string;
@@ -290,6 +200,9 @@ interface WatchStartOptions {
   note?: string;
 }
 
+// The thread's opening message. Player names arrive already formatted with
+// ratings. The start time goes after the code block because Discord does not
+// render `<t:...>` timestamps inside one.
 function watchStartText(options: WatchStartOptions): string {
   const width = Math.max('Board'.length, 'Time'.length, 'Komi'.length, 'Type'.length);
   const lines = [`${options.white} vs ${options.black} (#${options.gameNo})`];
@@ -310,25 +223,14 @@ function clearLowTimeTimer(state: WatchState): void {
   state.lowTimeTimer = undefined;
 }
 
-// Schedules the "running low on time" post for whoever is on the clock right
-// now. This has to be timer-driven rather than reactive: PlayTak only pushes
-// a clock update at move boundaries (one `Timems` immediately before each
-// move message, carrying the post-move values) and sends nothing at all while
-// a player is thinking - confirmed by observing live traffic, where an
-// 18-second turn produced zero clock messages. So waiting for an update to
-// tell us someone dropped under a minute would only ever catch a player who
-// was *already* low when their turn began, never the long think that burns a
-// healthy clock down - which is exactly the moment worth announcing.
-//
-// Instead, the clock at turn start tells us precisely when this player will
-// cross the threshold, and when they'd flag if they never moved, so both the
-// post and its countdown target are computed up front.
+// Schedules the low-time warning for the player on the clock. PlayTak only
+// sends clock updates at move boundaries, never while a player is thinking,
+// so the moment they cross the threshold is computed from their clock at turn
+// start rather than waited for.
 function scheduleLowTimeWarning(state: WatchState): void {
   clearLowTimeTimer(state);
   if (!state.live) return;
-  // PlayTak doesn't start either player's clock until both have made their
-  // (forced, untimed) opening move, so a countdown armed before that would
-  // be counting down from a clock that isn't actually running yet.
+  // Clocks do not run until both players have made their opening move.
   if (state.plies.length < 2) return;
 
   const isWhite = state.plies.length % 2 === 0;
@@ -346,14 +248,10 @@ function scheduleLowTimeWarning(state: WatchState): void {
   }, delayMs);
 }
 
-// `afterMove` is true only when this resolution was caused by the warned
-// player's own move landing. In that case the most recent Timems value
-// already has this game's increment credited back onto their clock - Fischer
-// increment is applied the instant a move completes - so it reads higher than
-// what their clock actually showed the moment they clicked to move. Subtract
-// it to show that real value instead. An undo or a game-ending event with no
-// final move (resignation, flag, abandonment) never credited an increment, so
-// the raw value is already correct there.
+// Final text for a resolved warning. When the warned player's own move ended
+// it (`afterMove`), the latest clock value already includes the increment
+// credited for that move, so the increment is subtracted to show the clock as
+// it stood when they moved.
 function staleWarningText(state: WatchState, color: 'white' | 'black', afterMove: boolean): string {
   const player = color === 'white' ? state.white : state.black;
   const rawSeconds = color === 'white' ? state.whiteSeconds : state.blackSeconds;
@@ -362,18 +260,10 @@ function staleWarningText(state: WatchState, color: 'white' | 'black', afterMove
   return `${player} was running low on time (${formatSeconds(seconds)} left).`;
 }
 
-// `<t:UNIX:R>` renders as a live relative countdown that ticks in the client
-// with no further edits from us, so the post stays accurate on its own until
-// something resolves it. `generation` is a snapshot of state.lowTimeGeneration
-// taken when this attempt was scheduled - if a move, undo, or game end
-// resolves the warning (bumping the generation) while the `.send()` below is
-// still in flight, resolveLowTimeWarning() finds nothing yet to edit (this
-// message doesn't exist yet) and no-ops. Without checking the generation
-// here too, this function would then go on to store the message as "the"
-// live warning once it finally lands - one nothing will ever resolve again,
-// since the event that should have resolved it already happened. Comparing
-// generations after the send catches that gap and edits the message to its
-// final text immediately instead.
+// Posts the countdown (`<t:...:R>` ticks client-side with no further edits).
+// If the warning was resolved while the send was in flight - the generation
+// moved on - the new message is edited straight to its final text, since
+// nothing else will ever resolve it.
 async function postLowTimeWarning(state: WatchState, isWhite: boolean, flagAtMs: number, generation: number): Promise<void> {
   if (state.lowTimeWarning) return;
 
@@ -395,13 +285,8 @@ async function postLowTimeWarning(state: WatchState, isWhite: boolean, flagAtMs:
   state.lowTimeWarning = { message, color: isWhite ? 'white' : 'black' };
 }
 
-// Replaces a live countdown with a static, no-longer-ticking readout the
-// moment it goes stale - a move landing, an undo, or the game ending. Only
-// one warning can exist at a time, so this always resolves whichever one is
-// pending regardless of what caused it, and is a no-op if none is pending
-// (but still bumps the generation counter - see postLowTimeWarning() - since
-// a warning can be "pending" in the sense of being in flight without having
-// reached state.lowTimeWarning yet).
+// Replaces a live countdown with static text. Always bumps the generation,
+// even with no warning showing, to catch one still in flight.
 async function resolveLowTimeWarning(state: WatchState, afterMove: boolean): Promise<void> {
   state.lowTimeGeneration = (state.lowTimeGeneration ?? 0) + 1;
   state.lastResolutionAfterMove = afterMove;
@@ -412,27 +297,10 @@ async function resolveLowTimeWarning(state: WatchState, afterMove: boolean): Pro
   await warning.message.edit(staleWarningText(state, warning.color, afterMove)).catch(() => {});
 }
 
-// Archives and locks the thread, then rewrites its close marker into the
-// "was archived on" record. Archive first, marker second: the marker is the
-// durable record everything else reads back (see findCloseMarker()), so it
-// must only ever claim the thread was archived once that's actually true.
-// `:D` (a plain date, no time) matches the "archived on" wording - the exact
-// time isn't especially useful once the countdown that used to show it is
-// gone.
-//
-// Archived and locked in one call rather than two - partly tidiness, but
-// mainly to close the window a two-call sequence leaves open for a message
-// (from a human still chatting) to land in between and un-archive the thread
-// again before it's actually locked. Locking needs Manage Threads where
-// archiving one's own thread doesn't, so if the combined edit is refused,
-// fall back to archiving alone rather than doing nothing: an unlocked
-// archived thread just reopens on the next human post and gets a fresh
-// countdown from the sweep, which is a far better failure mode than a thread
-// that never closes at all.
-//
-// Safe to call more than once on the same thread: re-archiving an archived
-// thread is a no-op, and the marker is only rewritten while it still reads
-// as pending.
+// Archives and locks the thread, then rewrites the close marker to record
+// when that happened. Archive and lock go in one edit so a message cannot
+// land between them and reopen the thread. Locking needs Manage Threads;
+// if the combined edit is refused, archive alone. Safe to call repeatedly.
 async function closeThread(thread: ThreadChannel, marker: CloseMarker | undefined): Promise<void> {
   const archived = await thread
     .edit({ archived: true, locked: true })
@@ -451,12 +319,9 @@ async function closeThread(thread: ThreadChannel, marker: CloseMarker | undefine
   await marker.message.edit(`${CLOSE_ARCHIVED_PREFIX} <t:${Math.floor(Date.now() / 1000)}:D>.`).catch(() => {});
 }
 
-// Text and board image in the same message, so the board always lands right
-// under the text describing it rather than as a separate, possibly
-// out-of-order post. `plies` defaults to the full current position but can
-// be a historical slice (renderBoardPng highlights the last ply of whatever
-// it's given). Returns the rendered PNG so callers that also mirror the
-// post (see mirrorSend()) don't render it twice.
+// Posts text and board image as one message. `plies` defaults to the current
+// position; the last ply given is highlighted. Returns the PNG so a mirror
+// post can reuse it.
 async function postBoard(state: WatchState, content: string, plies: string[] = state.plies): Promise<Buffer> {
   const png = renderBoardPng(state.boardSize, state.komi, plies, state.white, state.black);
   const attachment = new AttachmentBuilder(png, { name: 'board.png' });
@@ -464,9 +329,8 @@ async function postBoard(state: WatchState, content: string, plies: string[] = s
   return png;
 }
 
-// Best-effort duplicate of a game post into the game's replay thread, if
-// one is attached (see WatchState.mirrorThread) - a mirror failure must
-// never break the main thread, so errors are logged and swallowed.
+// Copies a post into the replay thread, if one is attached. Failures are
+// logged and never affect the main thread.
 async function mirrorSend(state: WatchState, content: string, png?: Buffer): Promise<void> {
   const mirror = state.mirrorThread;
   if (!mirror) return;
@@ -481,15 +345,14 @@ async function mirrorSend(state: WatchState, content: string, png?: Buffer): Pro
   }
 }
 
+// (Re)starts the settle timer. When it fires, the buffered history is posted
+// according to `historyMode` and the watch goes live.
 function armSettleTimer(state: WatchState): void {
   if (state.settleTimer) clearTimeout(state.settleTimer);
   state.settleTimer = setTimeout(async () => {
     state.live = true;
     try {
       if (state.historyMode === 'newThread' && state.plies.length > 0) {
-        // Never board-per-move here, even for a short history - a freshly
-        // opened thread starts with the compact summaries and the current
-        // position, and readers opt into the full drawing via /expand.
         for (const content of buildChunkContents(state.plies, 0)) {
           await state.thread.send(content);
         }
@@ -497,15 +360,10 @@ function armSettleTimer(state: WatchState): void {
       } else if (state.historyMode === 'reconnect') {
         const fromPly = state.catchupFromPly ?? 0;
         const missed = state.plies.slice(fromPly);
-        // Nothing actually happened while disconnected - no catch-up
-        // needed, so stay quiet rather than post a redundant board.
         if (missed.length > 0) {
           if (missed.length <= INLINE_CATCHUP_MAX_PLIES) {
-            // Few enough missed moves that drawing each one costs the same
-            // number of messages a text summary would - so just draw them.
-            // No clock values are known for missed moves, hence the bare
-            // Move lines, and no trailing current-position board: the last
-            // missed move's board IS the current position.
+            // Clock values are unknown for missed moves, so bare Move lines.
+            // The last board drawn is the current position.
             for (let k = fromPly; k < state.plies.length; k++) {
               await postBoard(state, moveOnlyText(k, state.plies[k]), state.plies.slice(0, k + 1));
             }
@@ -515,9 +373,7 @@ function armSettleTimer(state: WatchState): void {
             }
             await postBoard(state, currentPositionText(state));
           }
-          // A replay thread's whole purpose is board-per-move, so it gets
-          // the full missed range drawn inline regardless of how the main
-          // thread summarized it.
+          // A replay thread always gets board-per-move.
           if (state.mirrorThread) {
             for (let k = fromPly; k < state.plies.length; k++) {
               const png = renderBoardPng(state.boardSize, state.komi, state.plies.slice(0, k + 1), state.white, state.black);
@@ -531,8 +387,7 @@ function armSettleTimer(state: WatchState): void {
     } catch (err) {
       console.error(`Failed to post caught-up position for game #${state.gameNo}:`, err);
     }
-    // Someone may already be deep into a think when we start watching, so arm
-    // the warning here too rather than waiting for the next move to land.
+    // The player to move may already be deep into their think.
     scheduleLowTimeWarning(state);
   }, HISTORY_SETTLE_MS);
 }
@@ -548,11 +403,9 @@ function warningText(deadlineMs: number): string {
   return `${CLOSE_WARNING_PREFIX} <t:${Math.floor(deadlineMs / 1000)}:R>.`;
 }
 
-// Fires reconcileClose() for the thread at `atMs`. The timer re-reads the
-// thread's marker rather than trusting the deadline it was armed with: by
-// then the deadline may have moved (see closeDueAt()), and a thread whose
-// marker has gone missing is left for the sweep to re-warn rather than
-// closed blind.
+// Runs reconcileClose() at `atMs`. The marker is re-read at that point rather
+// than trusted from when the timer was armed, since the deadline may have
+// moved; a missing marker is left for the sweep.
 function armCloseTimer(thread: ThreadChannel, atMs: number): void {
   setTimeout(
     () => {
@@ -564,37 +417,23 @@ function armCloseTimer(thread: ThreadChannel, atMs: number): void {
   );
 }
 
-// Posts the close warning with its deadline embedded, and arms the timer
-// for it.
 async function scheduleClose(thread: ThreadChannel): Promise<void> {
   const deadlineMs = Date.now() + THREAD_CLOSE_DELAY_MS;
   await thread.send(warningText(deadlineMs)).catch(() => {});
   armCloseTimer(thread, deadlineMs);
 }
 
-// When this thread should actually close, given everything known about it:
-// 24h after its most recent message, or the deadline its pending warning
-// already shows, whichever is later. Keying off the most recent message is
-// what makes a live conversation keep pushing the close out, and a closed
-// thread that someone reopened get a fresh 24h rather than being shut again
-// on the next sweep pass - the behavior a channel moderator explicitly asked
-// for, in place of a fixed 24h-from-game-end that would slam a thread shut
-// mid-discussion. A pending marker's own deadline is honored too, so the
-// close can never come earlier than what the thread was already told.
+// When the thread should close: 24h after its most recent message, or the
+// deadline its warning already shows, whichever is later. Ongoing discussion
+// keeps pushing the close out, and a reopened thread gets a fresh 24h.
 function closeDueAt(marker: CloseMarker): number {
   const fromActivity = marker.lastActivityMs + THREAD_CLOSE_DELAY_MS;
   return marker.deadlineMs === undefined ? fromActivity : Math.max(marker.deadlineMs, fromActivity);
 }
 
-// Brings a still-open thread's close lifecycle up to date with its marker:
-// closes it if it's due, otherwise makes sure the marker shows the right
-// deadline - rewriting it in place, never posting a new one, whenever the
-// deadline has moved, or the thread was reopened after being closed and its
-// marker still reads "was archived". Shared by the close timer and by
-// sweepThreads(), so both paths make the same decision from the same durable
-// record. A rewrite re-arms the timer for the new deadline; a timer that
-// then fires to find its deadline superseded sees nothing to do, so timers
-// never pile up.
+// Closes the thread if due; otherwise rewrites the marker in place when its
+// deadline has moved (or it still reads "was archived" after a reopen) and
+// re-arms the timer. Shared by the close timer and the sweep.
 async function reconcileClose(thread: ThreadChannel, marker: CloseMarker): Promise<void> {
   const dueAt = closeDueAt(marker);
   if (Date.now() >= dueAt) {
@@ -609,12 +448,9 @@ async function reconcileClose(thread: ThreadChannel, marker: CloseMarker): Promi
 
 async function handleGameEnd(playtak: PlaytakClient, state: WatchState, resultText: string): Promise<void> {
   const ptnLink = buildPtnNinjaLink(state.gameNo);
-  // No move landed to end the game this way (resignation, flag, abandonment)
-  // - no increment was credited, so show the raw clock value.
+  // No move ended the game, so no increment was credited: show the raw clock.
   await resolveLowTimeWarning(state, false);
-  // Both the link and the timestamp stay outside the code block - masked links
-  // don't render as clickable inside a fenced block, and `<t:...>` timestamps
-  // don't render there at all.
+  // Link and timestamp stay outside the code block, where Discord renders them.
   const endedAt = Date.now();
   const startedAt = getGameStartedAt(state.gameNo);
   const endedLine =
@@ -631,16 +467,9 @@ async function handleGameEnd(playtak: PlaytakClient, state: WatchState, resultTe
   playtak.send(`Unobserve ${state.gameNo}`);
 }
 
-// Handles one PlaytakEvent for the watcher. Extracted so registerWatcher()
-// can run these strictly one at a time (see the queue below) rather than
-// letting Node invoke this listener again for the next event before this
-// one's awaited Discord API calls (postBoard's render+send is not cheap)
-// have finished - without that, two events for the same fast-moving game
-// (e.g. a move landing right as the other side's low-time warning is still
-// mid-send) can both read/mutate the same WatchState concurrently, which is
-// exactly what produced a duplicate low-time warning in testing: two
-// scheduleLowTimeWarning() calls both ended up targeting the same player
-// because the second one ran before the first's state updates had settled.
+// Handles one PlayTak event. Called strictly one at a time (see
+// registerWatcher()) so two events for the same game never read and mutate
+// the same WatchState concurrently.
 async function handleWatcherEvent(playtak: PlaytakClient, event: PlaytakEvent): Promise<void> {
   if (
     event.type !== 'gamePlace' &&
@@ -672,25 +501,20 @@ async function handleWatcherEvent(playtak: PlaytakClient, event: PlaytakEvent): 
   }
 
   if (event.type === 'gameUndo') {
-    // Nothing recorded yet to take back (e.g. an undo arriving mid
-    // history-replay before any ply landed) - ignore rather than pop an
-    // empty array.
     if (state.plies.length === 0) return;
 
     const undonePly = state.plies.length - 1;
     const undoingPlayer = undonePly % 2 === 0 ? state.white : state.black;
     state.plies.pop();
 
-    // Still catching up on history - just correct the buffered plies and
-    // let the settle timer's eventual catch-up post reflect the result;
-    // no live announcement to make yet.
+    // Still replaying history: just correct the buffer.
     if (!state.live) {
       armSettleTimer(state);
       return;
     }
 
     try {
-      // An undo credits no increment - show the raw clock value.
+      // An undo credits no increment: show the raw clock.
       await resolveLowTimeWarning(state, false);
       const undoText = codeBlock(['Move taken back', '', `${undoingPlayer} took back their move.`]);
       await state.thread.send(undoText);
@@ -722,8 +546,7 @@ async function handleWatcherEvent(playtak: PlaytakClient, event: PlaytakEvent): 
   const ply = state.plies.length;
   state.plies.push(ptn);
   try {
-    // This player's own move just landed - their clock already has this
-    // game's increment credited back onto it.
+    // The mover's clock already has this move's increment credited.
     await resolveLowTimeWarning(state, true);
     const content = moveText(state, ply, ptn);
     const png = await postBoard(state, content);
@@ -731,14 +554,11 @@ async function handleWatcherEvent(playtak: PlaytakClient, event: PlaytakEvent): 
   } catch (err) {
     console.error(`Failed to post move to thread for game #${event.gameNo}:`, err);
   }
-  // The turn just changed hands - arm the next warning against whoever is
-  // now on the clock.
   scheduleLowTimeWarning(state);
 }
 
 export function registerWatcher(playtak: PlaytakClient, discordClient: Client, registry: GameRegistry): void {
-  // Chains every event through one FIFO queue so handleWatcherEvent() calls
-  // never overlap - see its doc comment for why that matters.
+  // Events are chained through one promise so handlers never overlap.
   let eventQueue: Promise<void> = Promise.resolve();
   playtak.on('event', (event) => {
     eventQueue = eventQueue
@@ -748,42 +568,26 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
       });
   });
 
-  // A dropped/reconnected WebSocket loses every server-side Observe
-  // subscription. Re-subscribe to everything we were watching, the same way
-  // a fresh watch starts: history replays again, so plies/live are reset.
-  // The replay is silently reabsorbed rather than double-posted, but unlike
-  // a plain resume, we know exactly what the thread already showed
-  // (`catchupFromPly`), so once caught up the moves actually missed while
-  // disconnected get covered - drawn as one board message per move when the
-  // gap is small, or posted as /expand-fillable chunk summaries plus one
-  // current-position board when it isn't (see armSettleTimer()).
+  // A reconnect loses every server-side Observe. Re-observe each watched
+  // game; history replays again and the moves missed while disconnected are
+  // posted once it settles ('reconnect' mode).
   playtak.on('connected', () => {
     for (const state of activeWatches.values()) {
-      // state.live is only true once a previous catch-up has actually
-      // finished and the thread is known to be showing current plies - only
-      // then does state.plies.length mean "what the thread displayed".
-      // A reconnect landing while a previous replay is still in flight
-      // (state.live already false) would otherwise overwrite
-      // catchupFromPly with a partial replay count, corrupting what gets
-      // printed as "missed" once things finally settle - so leave it (and
-      // historyMode) untouched and just restart the observe.
+      // Only a live watch knows what the thread already shows. If a previous
+      // replay was still in flight, keep its catchupFromPly and mode.
       if (state.live) {
         state.catchupFromPly = state.plies.length;
         state.historyMode = 'reconnect';
       }
       state.live = false;
       state.plies = [];
-      // Any pending warning timer was armed against a ply count that's about
-      // to be rebuilt from scratch by the replay - drop it and let the
-      // post-catch-up scheduling arm a fresh one.
       clearLowTimeTimer(state);
       beginObserving(playtak, state);
     }
   });
 
-  // Run once shortly after connecting (covers a restart, giving the
-  // just-pushed GameList burst a moment to land first), then periodically -
-  // see sweepThreads() for why one pass handles both jobs.
+  // First sweep shortly after the initial connect (after the GameList replay
+  // lands), then periodically.
   playtak.once('connected', () => {
     const runSweep = () => {
       sweepThreads(discordClient, playtak, registry).catch((err) => {
@@ -795,9 +599,8 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
   });
 }
 
-// Re-fetches the thread from Discord to confirm it's still real - `fetch()`
-// throws if it's been deleted, and a manually-archived thread (as opposed to
-// one this bot archived itself on game end) shouldn't be silently reused.
+// Re-fetches the thread: deleted threads throw, and a manually archived one
+// is not reused.
 async function isThreadUsable(thread: ThreadChannel): Promise<boolean> {
   try {
     const fresh = await thread.fetch();
@@ -807,18 +610,13 @@ async function isThreadUsable(thread: ThreadChannel): Promise<boolean> {
   }
 }
 
-// The actual "no existing thread found anywhere" path - split out from
-// watchGame() so the in-flight-dedup wrapper below has something to memoize
-// per gameNo.
+// Reuses a thread from before a restart if Discord still has one for this
+// game; otherwise creates a new thread and starts observing.
 async function createOrReattachThread(
   playtak: PlaytakClient,
   parentChannel: TextChannel,
   game: GameListEntry,
 ): Promise<{ thread: ThreadChannel; alreadyWatching: boolean }> {
-  // This process's own maps are reset on every restart, so before creating
-  // anything, check Discord's actual thread list - a thread from before a
-  // restart still counts, and reusing it (rather than creating a second one)
-  // is the whole point of the "one thread per game" rule.
   const botId = parentChannel.client.user?.id;
   const found = await findExistingThread(parentChannel, game.gameNo, botId, false);
   if (found) {
@@ -851,7 +649,7 @@ async function createOrReattachThread(
     white: game.white,
     black: game.black,
     boardSize: game.boardSize,
-    // Wire komi is in half-point units (see Seek.java: `.komi(komi / 2.f)`).
+    // Wire komi is in half-points.
     komi: game.komi / 2,
     incrementSeconds: game.incrementSeconds,
     plies: [],
@@ -863,13 +661,8 @@ async function createOrReattachThread(
   return { thread, alreadyWatching: false };
 }
 
-// Strict one-thread-per-game rule: a thread is only ever created here after
-// two checks fail to find an existing one - `activeWatches` (this process's
-// own live tracking) and, inside createOrReattachThread(), Discord's actual
-// thread list (survives this process restarting). In between those two
-// checks and a new thread actually landing, `inFlightWatches` also catches
-// two near-simultaneous calls for the same game (see its own comment) - the
-// second caller just awaits the first's result instead of racing it.
+// One thread per game: reuse the active watch's thread, or an in-flight
+// creation, or a thread Discord already has, before creating a new one.
 export async function watchGame(
   playtak: PlaytakClient,
   parentChannel: TextChannel,
@@ -901,12 +694,8 @@ export async function watchGame(
   }
 }
 
-// Builds a Review thread for a finished game nobody watched live, from
-// PlayTak's public archive rather than the (now-gone) live WebSocket state -
-// see gameArchive.ts. Unlike watchGame()/beginObserving(), this never calls
-// Observe or arms any timers: the game is over, there's nothing to
-// subscribe to, only a record to lay out once. Returns undefined if the
-// archive has no record of this game (caller shows a generic error).
+// Builds a thread for a finished game from PlayTak's archive. Never sends
+// Observe or arms timers. Returns undefined if the archive has no record.
 export async function reconstructThread(parentChannel: TextChannel, gameNo: number): Promise<ThreadChannel | undefined> {
   const inFlight = inFlightReconstructs.get(gameNo);
   if (inFlight) return inFlight;
@@ -921,10 +710,8 @@ export async function reconstructThread(parentChannel: TextChannel, gameNo: numb
 }
 
 async function createReconstructedThread(parentChannel: TextChannel, gameNo: number): Promise<ThreadChannel | undefined> {
-  // Same "check Discord's actual thread list first" rule as watchGame() -
-  // this process's own maps don't survive a restart, and a finished game's
-  // thread is very likely archived by now, so archived threads are searched
-  // too (unlike watchGame(), which only needs to check active ones).
+  // A finished game's thread is likely archived, so archived threads are
+  // searched too.
   const botId = parentChannel.client.user?.id;
   const found = await findExistingThread(parentChannel, gameNo, botId, true);
   if (found) {
@@ -941,9 +728,7 @@ async function createReconstructedThread(parentChannel: TextChannel, gameNo: num
   });
   watchedThreads.set(gameNo, thread);
 
-  // A lightweight WatchState - just enough for currentPositionText()/
-  // postBoard() to render the final position. No live tracking fields are
-  // meaningful here (`live`/`historyMode` are unused off this path).
+  // Just enough state for postBoard() to render the final position.
   const state: WatchState = {
     gameNo,
     thread,
@@ -988,30 +773,20 @@ async function createReconstructedThread(parentChannel: TextChannel, gameNo: num
   return thread;
 }
 
-// A thread's close-lifecycle post, and which of its two states it's
-// currently in (see CLOSE_WARNING_PREFIX/CLOSE_ARCHIVED_PREFIX), plus the
-// one other fact the close decision needs - see closeDueAt().
+// A thread's close-lifecycle message and what the close decision needs from it.
 interface CloseMarker {
   message: Message;
   alreadyArchived: boolean;
-  // The deadline a pending warning currently shows. Undefined once archived,
-  // or if the text couldn't be parsed - in which case closeDueAt() falls back
-  // to activity-based timing alone, so a broken marker can only ever delay a
-  // close to "24h after the last message", never cause an early one.
+  // Deadline shown by a pending warning. Undefined once archived or if
+  // unparseable, in which case closeDueAt() uses activity alone, so a broken
+  // marker can only delay a close.
   deadlineMs?: number;
-  // When the thread's newest message was posted - the marker itself, if
-  // nothing came after it.
+  // Timestamp of the thread's newest message.
   lastActivityMs: number;
 }
 
-// Finds this thread's own close-lifecycle post, if it already has one - used
-// to detect that (so sweepThreads() doesn't restart the warn-then-close
-// cycle from scratch on every pass), and to decide whether it's actually
-// due yet (see closeDueAt()). Looks back 100 messages rather than a handful:
-// the marker is posted at game end, so everything after it is human
-// discussion, and a lively one can easily run past ten messages - missing
-// the marker behind them would restart the warn cycle with a fresh post,
-// the exact spam this exists to prevent.
+// Finds the thread's close marker among its last 100 messages (post-game
+// discussion can run long, and missing the marker would post a duplicate).
 async function findCloseMarker(thread: ThreadChannel): Promise<CloseMarker | undefined> {
   const recent = await thread.messages.fetch({ limit: 100 }).catch(() => null);
   const message = recent?.find((m) => CLOSE_MARKER_PATTERN.test(m.content));
@@ -1028,22 +803,12 @@ async function findCloseMarker(thread: ThreadChannel): Promise<CloseMarker | und
   };
 }
 
-// Matches the "Move: <number><W/B>. <ptn>" line every move/undo post carries
-// (see moveText()) - the only place a ply number appears in the thread's own
-// history. `\s+` rather than a fixed count of spaces since MOVE_LABEL_WIDTH
-// could change; the rest of the line (the "." and ptn) is ignored.
+// The "Move: <number><W|B>. <ptn>" line of a move post (see moveText()).
 const MOVE_LINE_PATTERN = /^Move:\s+(\d+)([WB])\b/m;
 
-// A cold restart has no memory of what a thread already showed - unlike a
-// same-process WebSocket reconnect, there's no `state.plies` left over to
-// diff against. Reconstructs the same information from the thread's own
-// message history instead, by finding the highest ply number mentioned in
-// any past move/undo post or covered by a catch-up chunk summary's header
-// (see catchup.ts - a chunked move needs no board post to count as shown),
-// so a resumed thread can still get a "what you missed" summary rather than
-// silently jumping straight to a bare board (see sweepThreads()). Returns
-// undefined - "unknown, don't guess" - if nothing in recent history carries
-// a ply number, e.g. a brand-new game with zero moves posted yet.
+// Recovers how many plies a thread already shows from its own messages: the
+// highest ply in any move post or chunk summary header. Returns undefined
+// when nothing carries a ply number.
 async function findKnownPlyCount(thread: ThreadChannel): Promise<number | undefined> {
   const recent = await thread.messages.fetch({ limit: 100 }).catch(() => null);
   if (!recent) return undefined;
@@ -1061,20 +826,11 @@ async function findKnownPlyCount(thread: ThreadChannel): Promise<number | undefi
   return highestPly === undefined ? undefined : highestPly + 1;
 }
 
-// How many pages of archived threads findExistingThread() will page through
-// looking for one game - mirrors /prune's own cap on the same API, for the
-// same reason (bounded, not open-ended).
 const MAX_ARCHIVED_THREAD_PAGES = 5;
 
-// Searches this channel's own threads for one this bot already created for
-// `gameNo`, so callers never end up creating a second thread for a game that
-// already has one - this process's own in-memory maps (`activeWatches`,
-// `watchedThreads`) are reset on every restart, so Discord's actual thread
-// list is the only reliable source of truth (same reasoning as
-// sweepThreads()). Active threads are always checked; archived ones only
-// when `includeArchived` is set, since paging through them is only worth the
-// extra API calls for reconstructThread() - a live /watch is latency-
-// sensitive and a live game's thread is never archived anyway.
+// Finds this bot's thread for `gameNo` in the channel. Active threads are
+// always checked; archived ones only when `includeArchived` is set, since
+// paging through them costs extra API calls.
 async function findExistingThread(
   parentChannel: TextChannel,
   gameNo: number,
@@ -1100,13 +856,9 @@ async function findExistingThread(
   return undefined;
 }
 
-// Resumes watching a game whose thread already exists but isn't in
-// `activeWatches` - shared by sweepThreads() (its periodic reconciliation)
-// and watchGame() (the new-thread path, when findExistingThread() turns up a
-// thread from before a restart). History replays again on the fresh Observe,
-// so `findKnownPlyCount()` recovers what the thread already showed from its
-// own message history, letting the eventual catch-up post show only what was
-// actually missed rather than the whole game again.
+// Starts observing a game whose thread already exists. What the thread
+// already shows is read from its message history so the catch-up covers
+// only the moves it is missing.
 async function resumeWatchingThread(playtak: PlaytakClient, thread: ThreadChannel, game: GameListEntry): Promise<void> {
   const knownPlyCount = await findKnownPlyCount(thread);
   beginObserving(playtak, {
@@ -1124,25 +876,11 @@ async function resumeWatchingThread(playtak: PlaytakClient, thread: ThreadChanne
   });
 }
 
-// Reconciles every one of the bot's own open game threads against live
-// PlayTak state, using Discord's own thread list as the source of truth
-// (this process has no memory of its own once it exits or reconnects) -
-// covers both jobs in one pass:
-//
-// - Still active but not currently in `activeWatches`? Something desynced
-//   (a missed live update, a restart) - silently resume watching it. History
-//   replays again on the fresh Observe, so this is the same "resume" path
-//   used on reconnect.
-// - No longer active? The game ended. If nothing's been posted about it yet,
-//   warn and start its 24h clock, mirroring the live game-over path.
-//   Otherwise hand it to reconcileClose(), which closes it only once it's
-//   actually due (see closeDueAt()) - not merely because a warning exists,
-//   which used to archive every game's thread within one sweep interval of
-//   it ending rather than the intended 24h later - and otherwise keeps the
-//   existing warning's deadline current. The in-memory close timer handles
-//   the common case with better precision than this sweep's own interval
-//   could; this branch is what still gets it right if that timer was lost
-//   to a restart, or if the thread reopened after being closed once already.
+// Reconciles every open watch thread against live state, using Discord's
+// thread list as the source of truth:
+// - Game still active but not watched: resume watching it.
+// - Game over: post the close warning if there is none, otherwise let
+//   reconcileClose() close it when due or keep its deadline current.
 export async function sweepThreads(discordClient: Client, playtak: PlaytakClient, registry: GameRegistry): Promise<void> {
   const botId = discordClient.user?.id;
   if (!botId) return;
@@ -1167,10 +905,7 @@ export async function sweepThreads(discordClient: Client, playtak: PlaytakClient
         continue;
       }
 
-      // Narrow window only: a live gameOver event can still be mid-flight
-      // between posting "Game Over" and this entry being deleted from
-      // activeWatches (see handleGameEnd()) - skip it here so this doesn't
-      // race that path into posting a duplicate "appears to have ended".
+      // A live game-over may still be mid-flight in handleGameEnd().
       if (activeWatches.has(gameNo)) continue;
 
       const marker = await findCloseMarker(thread);

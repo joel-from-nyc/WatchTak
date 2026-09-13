@@ -1,19 +1,15 @@
 import fs from 'fs';
 import path from 'path';
 
-// A /rating rule for one channel: when set, game notices there only show a
-// registered human rated at least `humanMin` playing another human, or a bot
-// rated at least `botMin` - hiding everything else, regardless of what
-// /announce or /showbots would otherwise say - see announcer.ts's
-// ratingRuleAllows(). Either bound can be omitted to mean "no minimum" on
-// that side.
+// A channel's /rating rule: game notices there only show a registered human
+// rated at least `humanMin` playing another human, or a bot rated at least
+// `botMin`. Either bound may be omitted. See announcer.ts's ratingRuleAllows().
 export interface RatingRule {
   humanMin?: number;
   botMin?: number;
 }
 
-// Mirrors showBotsStore.ts's approach - a plain JSON file, namespaced by
-// DISCORD_GUILD_ID the same way, for the same reasons (see its comment).
+// Same location and guild namespacing as announceStore.ts.
 function getStorePath(): string {
   const guildId = process.env.DISCORD_GUILD_ID;
   const filename = guildId ? `rating-state.${guildId}.json` : 'rating-state.json';
@@ -38,7 +34,7 @@ function writeState(state: RatingState): void {
   fs.writeFileSync(storePath, JSON.stringify(state, null, 2));
 }
 
-// Cached in memory for the same reason as showBotsStore.ts's - see its comment.
+// Cached in memory; this process is the only writer.
 let cached: RatingState | undefined;
 
 function state(): RatingState {

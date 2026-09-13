@@ -10,7 +10,6 @@ export const data = new SlashCommandBuilder()
       .setDescription('on or off - leave blank to check the current status')
       .addChoices({ name: 'on', value: 'on' }, { name: 'off', value: 'off' }),
   )
-  // Same default as /announce - members need Manage Channels to run this.
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels);
 
 export async function execute(interaction: ChatInputCommandInteraction) {

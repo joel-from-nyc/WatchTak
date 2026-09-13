@@ -36,23 +36,14 @@ export const data = new SlashCommandBuilder()
     sub.setName('new').setDescription('Build a replay thread with every move and board of this game, then follow it live'),
   );
 
-// How many pages of a thread's own messages to scan for unfilled chunk
-// summaries - more generous than findKnownPlyCount()'s single page, since
-// the summaries /expand fills can be buried under a long game's worth of
-// move posts and chat, but still bounded (2000 messages covers any
-// realistic thread).
+// Pages of thread messages to scan for unfilled chunk summaries.
 const MAX_CHUNK_SCAN_PAGES = 20;
 
-// Hard entry cap for /expand new - beyond this, a message-per-move thread
-// takes minutes of rate-limited sending to build and stops being a useful
-// way to read a game anyway; the ptn.ninja link posted at game end does
-// long-game replay strictly better.
+// /expand new refuses games longer than this; the ptn.ninja link covers them.
 const REPLAY_MAX_PLIES = 150;
 
-// The authoritative record of a game's moves, wherever it currently lives:
-// the in-memory watch state for a live watched game, or PlayTak's archive
-// for a finished one. `komi` is in real points (already divided from the
-// wire's half-point value), matching what renderBoardPng() expects.
+// A game's move record: the live watch state, or the archive for a finished
+// game. `komi` is in real points (wire half-points already divided).
 interface GameRecord {
   plies: string[];
   boardSize: number;
@@ -63,10 +54,7 @@ interface GameRecord {
   result?: string;
 }
 
-// Checked strictly in "cheapest and most authoritative first" order -
-// /expand never sends anything to PlayTak itself (the bot stays read-only
-// and single-connection), it only reuses what the watcher already buffered
-// or what the public archive returns.
+// Sends nothing to PlayTak: reads the watcher's buffer or the public archive.
 async function resolveGameRecord(gameNo: number): Promise<{ record: GameRecord } | { error: string }> {
   const snapshot = getActiveWatchSnapshot(gameNo);
   if (snapshot) {
@@ -74,10 +62,7 @@ async function resolveGameRecord(gameNo: number): Promise<{ record: GameRecord }
     return { record: { ...snapshot } };
   }
 
-  // Live but not watched - a brief window right after a restart, before the
-  // sweep re-adopts this thread (2s after connect, then every 15 minutes).
-  // Re-Observing from here would duplicate the watcher's whole lifecycle,
-  // so just say when to retry instead.
+  // Live but not yet re-adopted by the sweep after a restart.
   if (getGameRegistry().find(gameNo)) {
     return {
       error: "I'm not tracking this game's moves right now - the thread resyncs automatically. Try again in a minute.",
@@ -90,7 +75,6 @@ async function resolveGameRecord(gameNo: number): Promise<{ record: GameRecord }
       record: {
         plies: archived.plies,
         boardSize: archived.boardSize,
-        // Wire komi is in half-point units (see Seek.java: `.komi(komi / 2.f)`).
         komi: archived.komi / 2,
         white: archived.white,
         black: archived.black,
@@ -103,9 +87,7 @@ async function resolveGameRecord(gameNo: number): Promise<{ record: GameRecord }
   return { error: "Couldn't find a record of this game. If it just ended, the archive may need a minute - try again shortly." };
 }
 
-// One /expand at a time per game - a second invocation while boards are
-// still rendering/uploading would double-fill chunks or race the replay
-// thread's reuse check.
+// One /expand at a time per game.
 const inFlightExpands = new Set<number>();
 
 export async function execute(interaction: ChatInputCommandInteraction) {
@@ -140,12 +122,8 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   }
 }
 
-// Fills every unfilled chunk summary in the thread by editing it in place:
-// the text keeps its ply range and move list, and one board PNG per ply
-// rides along as a plain attachment gallery (attachment order is
-// chronological, and each board highlights its own move, so clicking
-// through shows the game advancing). Replies ephemerally - the filled
-// summaries themselves are the visible outcome.
+// Edits one board image per ply onto every unfilled chunk summary in the
+// thread. Attachments are in ply order and each highlights its own move.
 async function expandHere(interaction: ChatInputCommandInteraction, thread: AnyThreadChannel, gameNo: number): Promise<void> {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
@@ -164,9 +142,7 @@ async function expandHere(interaction: ChatInputCommandInteraction, thread: AnyT
     if (!batch || batch.size === 0) break;
     for (const message of batch.values()) {
       if (message.author.id !== botId) continue;
-      // Attachments present means already filled; the stale note means a
-      // previous run already found a takeback rewrote it. Both make a rerun
-      // of this command a clean no-op for that chunk.
+      // Already filled, or already marked stale by a previous run.
       if (message.attachments.size > 0) continue;
       if (message.content.includes(STALE_CHUNK_NOTE)) continue;
       const range = parseChunkHeader(message.content);
@@ -187,9 +163,8 @@ async function expandHere(interaction: ChatInputCommandInteraction, thread: AnyT
   let boards = 0;
   const skipped: string[] = [];
   for (const { message, fromPly, toPly } of chunks) {
-    // Takeback guard: if the game's actual history no longer produces the
-    // move list this chunk shows, drawing "its" boards would draw the wrong
-    // game - mark it stale instead so future runs skip it silently.
+    // If a takeback rewrote the moves this chunk lists, its boards would be
+    // wrong: mark it stale instead.
     const rewritten = toPly >= plies.length || !message.content.includes(expectedChunkMoveList(plies, fromPly, toPly));
     if (rewritten) {
       await message.edit(markChunkStale(message.content)).catch(() => {});
@@ -226,15 +201,12 @@ async function expandHere(interaction: ChatInputCommandInteraction, thread: AnyT
   await interaction.editReply(parts.join(' '));
 }
 
-// Builds a separate replay thread: every move of the game so far as its own
-// live-format message and board, then - for a game still in progress -
-// attaches it as the watch's live mirror so new moves keep landing in both
-// threads. Replies publicly in the game thread, since the link is useful to
-// every reader there.
+// Builds a replay thread with one message and board per move, then attaches
+// it as the watch's live mirror if the game is still in progress. Replies
+// publicly, since the link is useful to everyone in the thread.
 async function expandNew(interaction: ChatInputCommandInteraction, thread: AnyThreadChannel, gameNo: number): Promise<void> {
   await interaction.deferReply();
-  // Same pattern as /watch's alreadyWatching path: swap the public deferred
-  // placeholder for a private error, so failures don't clutter the thread.
+  // Failures replace the public placeholder with a private message.
   const fail = async (content: string) => {
     await interaction.deleteReply().catch(() => {});
     await interaction.followUp({ content, flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -260,8 +232,7 @@ async function expandNew(interaction: ChatInputCommandInteraction, thread: AnyTh
     return;
   }
 
-  // Threads can't nest, so the replay thread is created alongside the game
-  // thread in its parent channel.
+  // Threads cannot nest; the replay is created in the parent channel.
   const parent = thread.parent;
   if (!(parent instanceof TextChannel)) {
     await fail("Couldn't find the text channel this thread belongs to.");
@@ -296,10 +267,7 @@ async function expandNew(interaction: ChatInputCommandInteraction, thread: AnyTh
     )
     .catch(() => {});
 
-  // Every board appearing below is its own progress indicator, so no
-  // separate progress posts - just the closing message when done. Each send
-  // is awaited sequentially; discord.js queues the channel rate limit
-  // (~1 message/second when throttled).
+  // Sends are sequential; discord.js queues the channel rate limit.
   const postedPlies: string[] = [];
   try {
     while (true) {
@@ -312,8 +280,7 @@ async function expandNew(interaction: ChatInputCommandInteraction, thread: AnyTh
           );
           return;
         }
-        // Mid-resync after a disconnect - the watch's plies are being
-        // rebuilt and aren't authoritative until it settles again.
+        // Mid-resync after a disconnect: wait for the plies to settle.
         if (!snapshot.live) {
           await new Promise((resolve) => setTimeout(resolve, 1000));
           continue;
@@ -321,8 +288,7 @@ async function expandNew(interaction: ChatInputCommandInteraction, thread: AnyTh
         current = snapshot.plies;
       }
 
-      // Takeback guard: a mid-replay undo can rewrite plies this thread
-      // already posted - stop rather than continue a divergent replay.
+      // A takeback during the build rewrites posted plies: stop.
       const stillMatches =
         current.length >= postedPlies.length && postedPlies.every((ptn, i) => current[i] === ptn);
       if (!stillMatches) {
@@ -344,9 +310,8 @@ async function expandNew(interaction: ChatInputCommandInteraction, thread: AnyTh
     }
 
     if (record.live) {
-      // Moves that landed during the replay were picked up by the snapshot
-      // re-reads above, so attaching the mirror only once fully caught up
-      // means nothing is dropped or double-posted across the handoff.
+      // The mirror is attached only once fully caught up, so no move is
+      // dropped or double-posted across the handoff.
       if (attachMirrorThread(gameNo, replayThread)) {
         await replayThread.send(codeBlock(['Caught up - now following the live game.']));
       } else {

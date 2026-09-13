@@ -27,15 +27,11 @@ function describeGame(game: GameListEntry): string {
   return `#${game.gameNo} - **${game.white}** vs **${game.black}**`;
 }
 
-// Discord's own caps on an autocomplete response.
+// Discord's caps on an autocomplete response.
 const MAX_CHOICES = 25;
 const MAX_CHOICE_NAME = 100;
 
-// One dropdown row: both players with their ratings, then the board size and
-// time control, so a watcher can pick the game they actually want to follow
-// rather than guessing from names alone. Truncated defensively - PlayTak
-// usernames are short, but the cap is Discord's and a rejected response
-// would mean no dropdown at all.
+// One dropdown row: players with ratings, board size, and time control.
 function choiceName(game: GameListEntry): string {
   const white = formatPlayerName(game.white, getRating(game.white));
   const black = formatPlayerName(game.black, getRating(game.black));
@@ -44,12 +40,8 @@ function choiceName(game: GameListEntry): string {
   return label.length > MAX_CHOICE_NAME ? `${label.slice(0, MAX_CHOICE_NAME - 1)}…` : label;
 }
 
-// Answers the live dropdown Discord shows while someone is typing the
-// `game` option. The value handed back is always the game number, so
-// execute() takes its unambiguous "this exact game" path and the "matches
-// more than one active game" reply becomes unreachable for anyone using the
-// dropdown. Everything here reads the in-memory registry, so it comfortably
-// beats Discord's 3-second autocomplete deadline without touching PlayTak.
+// The submitted value is always the game number, so a dropdown pick takes
+// execute()'s exact-game path.
 export async function autocomplete(interaction: AutocompleteInteraction): Promise<void> {
   const typed = interaction.options.getFocused().trim().toLowerCase();
   const registry = getGameRegistry();
@@ -62,16 +54,14 @@ export async function autocomplete(interaction: AutocompleteInteraction): Promis
         game.white.toLowerCase().includes(typed) ||
         game.black.toLowerCase().includes(typed),
     )
-    // Highest game number first - ids are issued at game start, so this puts
-    // the most recently started games at the top of the list.
+    // Newest games first (ids are issued at game start).
     .sort((a, b) => b.gameNo - a.gameNo)
     .slice(0, MAX_CHOICES);
 
   await interaction
     .respond(matches.map((game) => ({ name: choiceName(game), value: String(game.gameNo) })))
-    // A dropdown that can't be answered (the 3s window passed, or the
-    // interaction is already gone) is not worth surfacing beyond a log -
-    // the user simply types the name out as before.
+    // An unanswerable dropdown (3s window passed) just means the user types
+    // the name out.
     .catch(() => {});
 }
 
@@ -79,7 +69,6 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const query = interaction.options.getString('game')?.trim();
 
   if (!query) {
-    // Same output as /list, and private for the same reason.
     await interaction.reply({ content: buildGamesListReply(), flags: MessageFlags.Ephemeral });
     return;
   }
@@ -117,12 +106,8 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const { thread, alreadyWatching } = await watchGame(getPlaytakClient(), interaction.channel, game);
 
   if (alreadyWatching) {
-    // A thread for this game already exists (whether this process was
-    // already watching it, or one turned up from before a restart - see
-    // watchGame()'s "one thread per game" rule) - swap the public deferred
-    // placeholder for a private link instead of a public "already watching"
-    // post, so multiple people trying to watch the same popular game don't
-    // spam the channel.
+    // Swap the public placeholder for a private link, so repeat requests for
+    // a popular game do not clutter the channel.
     await interaction.deleteReply().catch(() => {});
     await interaction.followUp({ content: `This game already has a thread. Spectate: ${thread}`, flags: MessageFlags.Ephemeral });
     return;

@@ -7,20 +7,15 @@ import { formatPlayerBold } from './ratings';
 import { discordTime, formatDuration } from './format';
 import { noteGameStarted, getGameStartedAt } from './gameTimes';
 
-// PlayTak's wire protocol gives no id linking a seek to the game it becomes -
-// a `Seek remove` fires identically whether the seek was cancelled or just
-// got matched into a game, and a `GameList Add` carries no reference back to
-// the seek that spawned it. The only signal available is that the same
-// player name disappears from the seek list and appears in a new game at
-// roughly the same moment, so that's what's correlated here, in both
-// directions since event ordering between the two isn't guaranteed.
+// The protocol carries no link between a seek and the game it becomes: a
+// `Seek remove` looks the same whether the seek was cancelled or accepted,
+// and a `GameList Add` does not reference a seek. A removal and a new game
+// naming the same player within this window are treated as the same event,
+// in either order.
 const CORRELATION_WINDOW_MS = 5000;
 
-// On every (re)connect PlayTak replays the whole active game list as
-// `GameList Add`. Those are hours-old games, not games just starting, so
-// correlating during the replay would announce "has started!" for whatever
-// happened to have a seek removed at the same moment. Mirrors the same
-// settling window registry.ts and announcer.ts use for the same reason.
+// (Re)connects replay the whole active game list as `GameList Add`. Games
+// arriving within this window after connect are not correlated.
 const REPLAY_SETTLE_MS = 2000;
 
 // A seek announcement the bot posted and can still edit or delete.
@@ -30,14 +25,9 @@ export interface SeekMessageRef {
 }
 
 interface PendingRemoval {
-  // The seek that was removed, kept in full (not just the player name) so a
-  // later match can pass it to announceGame() - it's the only source of
-  // bot-status the protocol offers, and only for this player's side (see
-  // announcer.ts's modeAllowsGame()).
+  // Kept whole: the seek's bot flag is the only bot signal for its poster.
   seek: Seek;
-  // Empty for a private (opponent-targeted) seek - it was never announced
-  // anywhere, so there's nothing to edit; a match posts a fresh notice
-  // instead (see postFreshGameNotice()).
+  // Empty for a seek that was never announced (private, or no channel on).
   refs: SeekMessageRef[];
   timer: NodeJS.Timeout;
 }
@@ -50,22 +40,14 @@ interface PendingGame {
 const pendingRemovals: PendingRemoval[] = [];
 const pendingGames: PendingGame[] = [];
 
-// Which announcement message(s) ended up advertising each live game, so the
-// button can be swapped for a review link once that game finishes. Carries
-// the player names too, so retireGameNotice() can render the "finished" text
-// directly instead of reading the live message back - discord.js's
-// `MessageManager#edit()` returns a patched clone but doesn't write it into
-// the channel's message cache, so a later `messages.fetch()` can hand back
-// the pre-edit content and silently overwrite the notice with stale text.
+// Live game notices by game number, with the player names so the finished
+// text can be rendered without re-reading the message (discord.js's
+// `MessageManager#edit()` does not update the channel's message cache).
 const noticesByGame = new Map<number, { refs: SeekMessageRef[]; white: string; black: string }>();
 
 let replayingUntil = 0;
 
-// Whether `messageId` is still the live notice for a game noticesByGame is
-// tracking - i.e. an in-progress game whose "has started!" notice will get
-// swapped in place for a "has finished." one once it ends (see
-// retireGameNotice()). /prune must leave this alone even if it no longer
-// matches current rules, per its "skip live notices" scope.
+// Whether `messageId` is the notice of a game still in progress.
 export function isTrackedGameMessage(messageId: string): boolean {
   for (const notice of noticesByGame.values()) {
     if (notice.refs.some((ref) => ref.messageId === messageId)) return true;
@@ -93,10 +75,7 @@ async function deleteRefs(discordClient: Client, refs: SeekMessageRef[]): Promis
   }
 }
 
-// "X vs Y (#123) has started!" plus, on its own line, when that happened -
-// kept outside any code block so Discord renders it in each viewer's own
-// timezone (see format.ts's discordTime()). The timestamp keeps ticking on
-// its own in every client, so the notice stays accurate without re-editing.
+// "X vs Y (#123) has started!" plus a viewer-local start timestamp.
 function startedContent(game: GameListEntry): string {
   const headline =
     `${formatPlayerBold(game.white)} vs ${formatPlayerBold(game.black)} (#${game.gameNo}) has started!`;
@@ -104,9 +83,8 @@ function startedContent(game: GameListEntry): string {
   return startedAt === undefined ? headline : `${headline}\nStarted ${discordTime(startedAt)}`;
 }
 
-// Turns the seek's own announcement into the game-started notice rather than
-// deleting it and posting a fresh message - same message slot, so an active
-// channel doesn't accumulate two posts per game.
+// Edits the seek's announcement into the game-started notice, reusing the
+// same message slot.
 async function convertToGameNotice(
   discordClient: Client,
   game: GameListEntry,
@@ -134,12 +112,8 @@ async function convertToGameNotice(
   if (landed.length > 0) noticesByGame.set(game.gameNo, { refs: landed, white: game.white, black: game.black });
 }
 
-// Used when there's no existing seek announcement to convert - a game that
-// came from a private (opponent-targeted) challenge, such as a rematch,
-// which announcer.ts never shows anywhere since it's not a public seek.
-// Posts a fresh notice to every channel that's currently announcing and not
-// in quiet mode, so it behaves the same as a converted one from here on
-// (same retirement/pruning path, same button).
+// Posts a new notice to every eligible channel, for a game with no seek
+// announcement to convert (a private challenge such as a rematch).
 async function postFreshGameNotice(discordClient: Client, game: GameListEntry, seek: Seek | undefined): Promise<void> {
   const content = startedContent(game);
   const landed: SeekMessageRef[] = [];
@@ -161,12 +135,8 @@ async function postFreshGameNotice(discordClient: Client, game: GameListEntry, s
   if (landed.length > 0) noticesByGame.set(game.gameNo, { refs: landed, white: game.white, black: game.black });
 }
 
-// A channel's mode can suppress game-started notices outright (`quiet`) or
-// only for games that don't match its filter (`noguest`/`users`) - either
-// way, seek announcements themselves are unaffected by it, so a converted
-// seek that doesn't clear its channel's filter doesn't become a notice
-// there, it's just deleted the same way a cancelled seek's announcement
-// always has been.
+// Converts the seek announcements in channels whose settings allow a notice
+// for this game, deletes the rest, and posts fresh where there were none.
 async function announceGame(
   discordClient: Client,
   game: GameListEntry,
@@ -181,18 +151,13 @@ async function announceGame(
   if (activeRefs.length > 0) {
     await convertToGameNotice(discordClient, game, activeRefs);
   } else if (refs.length === 0) {
-    // A private seek was never posted anywhere - post fresh to whatever
-    // channels are eligible right now, rather than nowhere.
     await postFreshGameNotice(discordClient, game, seek);
   }
 }
 
-// Once the game is over the watch button is a trap - it can no longer start a
-// watch, since the game is gone from the registry. Swap it for a Review
-// button (handled lazily, same as Watch - see index.ts), and prune the
-// channel down to just this one message: Discord's own "X started a thread"
-// system message, posted here when the thread was created, is deleted too,
-// since the notice itself (now pointing at the thread via Review) is enough.
+// On game end: swap the Watch button for Review, rewrite the notice as
+// "has finished", and delete Discord's "started a thread" line for the
+// game's thread since the notice now links to it.
 async function retireGameNotice(discordClient: Client, gameNo: number): Promise<void> {
   const notice = noticesByGame.get(gameNo);
   if (!notice) return;
@@ -224,35 +189,21 @@ function dropPendingRemoval(entry: PendingRemoval): void {
   if (index !== -1) pendingRemovals.splice(index, 1);
 }
 
-// A private, opponent-targeted seek that's confirmed non-bot - a rematch or
-// any other direct challenge between two humans. announcer.ts never
-// announces these (they're not public), but they're just as worth a
-// game-started notice once accepted - the wire protocol offers no way to
-// tell "rematch" apart from any other direct challenge anyway, so this
-// covers both the same way.
+// A direct challenge between humans (e.g. a rematch). Never announced as a
+// seek, but worth a game notice once accepted.
 function isPrivateHumanSeek(seek: Seek): boolean {
   return seek.opponent !== '' && seek.isBot === false;
 }
 
-// A public seek posted by a bot - announcer.ts deliberately never shows these
-// (see isAnnounceable(); bots keep seeks open near-permanently, and would
-// bury the human ones the seek list exists for), so refs is always empty for
-// one. But if a human accepts it, that's exactly the kind of game-started
-// event /announce exists for - so it needs tracking here the same way a
-// private human seek is, letting announceGame()'s mode filter make the real
-// call on whether it gets a notice.
+// A bot's public seek. Never announced as a seek, but a human accepting it
+// is a game worth a notice, subject to the channel's mode.
 function isBotPublicSeek(seek: Seek): boolean {
   return seek.opponent === '' && seek.isBot === true;
 }
 
-// Called from announcer.ts the moment a seek disappears, handing over the
-// announcement messages that were advertising it (empty for a seek that was
-// never shown anywhere - either private, or public but posted to no
-// currently-announcing channel). Fate is decided here: converted into a game
-// notice (or, with no refs, posted fresh) if a matching game shows up within
-// the window, deleted if it doesn't (the seek was simply cancelled) -
-// deletion only applies to real refs, since there's nothing to delete for a
-// private seek that never panned out.
+// Called when a seek disappears. If a matching game already arrived, the
+// notice is posted now; otherwise the removal waits for one. If none comes
+// within the window, the seek was cancelled and its announcements are deleted.
 export function notifySeekRemoved(discordClient: Client, seek: Seek, refs: SeekMessageRef[]): void {
   if (refs.length === 0 && !isPrivateHumanSeek(seek) && !isBotPublicSeek(seek)) return;
 
@@ -284,9 +235,7 @@ export function notifySeekRemoved(discordClient: Client, seek: Seek, refs: SeekM
 function notifyGameAdded(discordClient: Client, game: GameListEntry): void {
   if (Date.now() < replayingUntil) return;
 
-  // Past the replay guard, so this is a game genuinely starting right now
-  // rather than an old one being re-listed after a (re)connect - which makes
-  // this the one and only moment its start time is knowable (see gameTimes.ts).
+  // Past the replay window, so this game is starting right now.
   noteGameStarted(game.gameNo);
 
   const matchIndex = pendingRemovals.findIndex((p) => p.seek.player === game.white || p.seek.player === game.black);

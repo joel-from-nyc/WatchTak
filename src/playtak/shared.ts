@@ -2,9 +2,7 @@ import { PlaytakClient } from './client';
 import { GameRegistry } from './registry';
 import { SeekRegistry } from './seekRegistry';
 
-// A single shared guest connection for the whole bot. PlayTak's guest login
-// is meant for humans, so every feature (/seeks, /list, /watch) reuses this
-// one connection rather than opening its own.
+// The single PlayTak connection and its registries, shared by every feature.
 let client: PlaytakClient | undefined;
 let gameRegistry: GameRegistry | undefined;
 let seekRegistry: SeekRegistry | undefined;

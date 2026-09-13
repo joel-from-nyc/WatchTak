@@ -1,6 +1,5 @@
-// Throwaway probe: connect to PlayTak as a guest and log every raw line the
-// server sends, so we can design the real protocol parser against actual
-// traffic instead of guessing from docs. Not wired into the bot.
+// Connects to PlayTak as a guest and logs every raw line the server sends.
+// Not used by the bot.
 //
 // Run with: npx ts-node src/scripts/playtak-probe.ts
 

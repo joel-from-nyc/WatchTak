@@ -12,9 +12,7 @@ import * as rating from './commands/rating';
 import * as prune from './commands/prune';
 import * as expand from './commands/expand';
 
-// Same env-file selection as index.ts - which instance's commands get
-// registered depends on which env file is loaded, so this must be explicit
-// rather than always registering whatever `.env` happens to contain.
+// Same env-file argument as index.ts.
 const envFile = process.argv[2] ?? '.env';
 dotenv.config({ path: envFile });
 
@@ -43,11 +41,8 @@ const commands = [
 const rest = new REST().setToken(DISCORD_TOKEN);
 
 async function main() {
-  // Guild-scoped registration shows up instantly - each bot instance only
-  // ever lives in one Discord server (a separate test instance runs
-  // separately from the production one), so there's no need for global
-  // registration's "works in every server" tradeoff of up to an hour to
-  // propagate.
+  // Guild-scoped registration takes effect immediately; global registration
+  // can take up to an hour to propagate.
   const route = DISCORD_GUILD_ID
     ? Routes.applicationGuildCommands(DISCORD_CLIENT_ID!, DISCORD_GUILD_ID)
     : Routes.applicationCommands(DISCORD_CLIENT_ID!);
@@ -56,9 +51,7 @@ async function main() {
   await rest.put(route, { body: commands });
   console.log('Commands registered successfully.');
 
-  // Clear any leftover global registration from before the switch back to
-  // guild-scoped - otherwise they'd sit alongside the new guild-scoped ones
-  // and show up twice.
+  // Clear any global registration so commands do not appear twice.
   if (DISCORD_GUILD_ID) {
     console.log('Clearing old global commands...');
     await rest.put(Routes.applicationCommands(DISCORD_CLIENT_ID!), { body: [] });
