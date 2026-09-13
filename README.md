@@ -1,111 +1,151 @@
-# NokBot — Tak/PlayTak Discord Bot
+# WatchTak
 
-A TypeScript Discord bot (discord.js) for the abstract board game Tak and
-the [PlayTak.com](https://playtak.com) community. It keeps a single
-read-only guest connection to PlayTak open and bridges it into Discord:
-browsing open seeks and in-progress games, and watching a specific game
-live in a thread as it's played, with board images and PTN notation.
+A Discord bot for following [PlayTak](https://playtak.com) games.
 
-The bot never writes anything to PlayTak — no seeks, no moves, no account
-actions. It only listens to the public seek/game-list broadcasts every
-guest connection receives, and (when someone runs `/watch`) subscribes to
-one game's move stream to mirror it into Discord.
+WatchTak keeps one read-only guest connection to PlayTak open and mirrors it
+into a Discord server: it lists open seeks and games in progress, announces
+new seeks and game starts in a channel, and follows a chosen game live in its
+own thread with a board image and PTN notation for every move.
+
+The bot never writes anything to PlayTak. It sends no seeks, no moves, and no
+account actions. It only listens to the broadcasts every guest connection
+receives, and subscribes to a game's move stream when someone asks to watch it.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `/ping` | Health check with round-trip latency. |
+| `/list` | Lists games currently in progress. |
+| `/seeks` | Lists open public seeks. |
+| `/watch <game>` | Follows a live game in a thread. Takes a game number or a partial player name, with autocomplete. `/spectate` is an alias. With no argument it behaves like `/list`. |
+| `/expand here` | Inside a game thread: attaches board images to any catch-up summaries that were posted without them. |
+| `/expand new` | Inside a game thread: builds a separate replay thread with one board per move, then mirrors the live game into it. |
+| `/help` | Describes every command. |
+
+Moderator commands (default permission: Manage Channels):
+
+| Command | What it does |
+|---|---|
+| `/announce on\|off\|quiet\|noguest\|users` | Keeps a live list of joinable human seeks in the channel, removing each as it is taken or cancelled, and posts a notice with a Watch button when one becomes a game. `quiet` suppresses game notices; `noguest` and `users` filter them. Survives restarts. |
+| `/showbots on\|off` | Whether games with a bot on either side get a game notice. |
+| `/rating human:<n> bot:<n>` | Only post game notices for games with a registered human rated at least `human`, against another human or a bot rated at least `bot`. Overrides `/showbots` and the announce filters (but not `quiet`). `/rating off` clears it. |
+| `/prune duplicates\|threads\|messages` | Removes the bot's own stale messages and threads: duplicate watch threads, threads and notices that no longer match the channel's settings, and day-old threads nobody chatted in. Live games are never touched. |
+
+Stale notices and unused threads are also cleaned up automatically every
+30 minutes in every channel where `/announce` has been configured. A finished
+game's thread is archived 24 hours after its last message.
 
 ## Setup
 
-1. **Create the Discord application**
-   - Go to https://discord.com/developers/applications → New Application.
-   - Under "Bot", click "Reset Token" and copy it — this is `DISCORD_TOKEN`.
-   - Copy the "Application ID" from General Information — this is `DISCORD_CLIENT_ID`.
-   - Under Installation, if the app is private (not a Public Bot), set the
-     default Install Link to "None".
+Requires Node 22.
 
-2. **Install dependencies**
+1. **Create the Discord application** at
+   https://discord.com/developers/applications.
+   - Bot tab: Reset Token and copy it. This is `DISCORD_TOKEN`.
+   - General Information: copy the Application ID. This is `DISCORD_CLIENT_ID`.
+   - If the app is private, set Installation > Install Link to "None".
+
+2. **Install dependencies.**
    ```bash
    npm install
    ```
-   This pulls in `tps-ninja` (board image rendering), which depends on the
-   native `canvas` package. If its install script isn't auto-approved by
-   npm, run `npm install-scripts approve canvas`.
+   Board rendering uses `tps-ninja`, which depends on the native `canvas`
+   package. If npm blocks its install script, run
+   `npm install-scripts approve canvas` and install again. Board images use
+   the Roboto font when it is installed on the host, and fall back to the
+   system default otherwise.
 
-3. **Configure environment**
+3. **Configure the environment.**
    ```bash
    cp .env.example .env
    ```
-   Fill in `DISCORD_TOKEN` and `DISCORD_CLIENT_ID`. For fast local testing,
-   also set `DISCORD_GUILD_ID` to your test server's ID (right-click the
-   server icon with Developer Mode on in Discord settings → Advanced).
+   Fill in `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, and `DISCORD_GUILD_ID` (the
+   server ID; right-click the server icon with Developer Mode on). Commands are
+   registered to that one server, which makes changes show up instantly. A bot
+   instance is meant to live in a single server; run a second instance with its
+   own `.env` to serve another.
 
-4. **Invite the bot to your server**
-   Build an invite URL in the Developer Portal under OAuth2 → URL Generator:
-   - Scopes: `bot`, `applications.commands`
-   - Bot permissions: `Send Messages`, `Read Message History`, `Create Public Threads`,
-     `Send Messages in Threads`, `Manage Threads` (needed to archive/lock
-     watch threads when a game ends)
-   Open the generated URL and add the bot to your test server.
+4. **Invite the bot.** In OAuth2 > URL Generator choose the `bot` and
+   `applications.commands` scopes, and these bot permissions: Send Messages,
+   Read Message History, Create Public Threads, Send Messages in Threads,
+   Manage Threads (to archive finished game threads), Manage Messages (lets
+   `/prune` bulk-delete instead of deleting one message at a time). Open the
+   generated URL and add the bot to the server.
 
-5. **Register the slash commands**
+5. **Register the slash commands.** Run this again whenever a command's name,
+   description, or options change.
    ```bash
    npm run deploy-commands
    ```
-   Run this again any time you add or change a command.
 
-6. **Run the bot**
+6. **Run it.**
    ```bash
    npm run dev
    ```
-   You should see `Logged in as YourBot#1234`.
+   The log shows `Logged in as ...`, `Connected to PlayTak.`, and the number of
+   ratings loaded.
 
-7. **Try it**
-   - `/ping` — health check.
-   - `/seeks` — see what open seeks anyone can join right now.
-   - `/list` — see what games are currently in progress.
-   - `/watch <game>` (or `/spectate`) — pass a game ID or a player
-     name (partial names work, matched anywhere in the name) to open a
-     thread and follow that game live. Leave it blank to behave like `/list`.
-   - `/announce on` / `/announce off` — turn a live list of joinable seeks on or
-     off in the current channel, posted as humans open them and removed as
-     they're taken. `/announce` with no argument reports the current status.
+### Running as a service
+
+For an always-on deployment, build once and run the compiled output:
+
+```bash
+npm run build
+npm start
+```
+
+`npm start` runs `node dist/index.js`. Point any process manager (systemd,
+NSSM on Windows, pm2, Docker) at that command with the project directory as the
+working directory, since `.env` and `data/` are resolved relative to it. The
+bot handles `SIGINT`/`SIGTERM` for a clean stop. After pulling a new version:
+rebuild, re-run `deploy-commands` if commands changed, and restart the process.
+
+To run two instances from one checkout (for example production and testing),
+give each its own env file and pass it as the first argument:
+`node dist/index.js .env.testing`. Per-instance state files in `data/` are
+namespaced by `DISCORD_GUILD_ID`.
 
 ## Project structure
 
 ```
 src/
-  index.ts               # Bot entry point: logs in, wires up commands and the PlayTak connection
-  deploy-commands.ts     # One-off script to register slash commands with Discord
-  commands/
-    ping.ts               # Health-check command
-    list.ts                # List in-progress PlayTak games
-    watch.ts, spectate.ts  # Watch a game live in a thread (+ alias)
-    seeks.ts                # List open joinable seeks
-    announce.ts             # Toggle the live joinable-seeks list in a channel
-    help.ts                # Full command/alias explanations
+  index.ts             Entry point: Discord login, command dispatch, button handlers, shutdown
+  deploy-commands.ts   Registers the slash commands with Discord
+  commands/            One file per slash command (spectate.ts is an alias of watch.ts)
   playtak/
-    client.ts             # The single guest WebSocket connection to PlayTak
-    protocol.ts            # Wire-protocol parser -> typed events
-    shared.ts               # Singleton wiring the connection + registries together
-    registry.ts, seekRegistry.ts  # Live in-memory views of active games / open seeks
-    gamesReply.ts, seeksReply.ts  # Shared reply text builders for the commands above
-    announcer.ts            # Live joinable-games list: post on open, delete when taken
-    watcher.ts              # Thread lifecycle: create/reuse, live moves, reconnect, sweep
-    ptn.ts, ptnLink.ts, result.ts, boardImage.ts  # Notation, links, results, board rendering
-  scripts/
-    playtak-probe.ts, playtak-client-probe.ts  # Standalone protocol-debugging scripts
-  types/
-    tps-ninja.d.ts          # Ambient types for the untyped tps-ninja package
+    client.ts          The single guest WebSocket connection to PlayTak
+    protocol.ts        Parses PlayTak's line-based wire protocol into typed events
+    shared.ts          Singleton wiring the connection and registries together
+    registry.ts        Live in-memory view of active games
+    seekRegistry.ts    Live in-memory view of open seeks
+    ratings.ts         Player ratings, polled from playtak.com's rating list
+    gameArchive.ts     Finished games, fetched from PlayTak's public archive
+    watcher.ts         Watch-a-game lifecycle: threads, live moves, reconnects, close/archive
+    catchup.ts         Catch-up summary messages that /expand fills with boards
+    announcer.ts       /announce: live seek list per channel
+    seekToGame.ts      Correlates a removed seek with the game it became
+    autoPrune.ts       Silent periodic cleanup of stale notices and threads
+    pruneRules.ts      Scanning and deletion helpers shared by /prune and autoPrune
+    announceStore.ts, showBotsStore.ts, ratingStore.ts   Per-channel settings persisted to data/
+    ptn.ts, ptnLink.ts, result.ts, boardImage.ts, format.ts   Notation, links, results, rendering, text
+    presence.ts        "Watching N games on PlayTak" status
+  scripts/             Standalone tools: protocol probes and a one-off avatar setter
+  types/               Ambient types for tps-ninja
+assets/                The bot's profile picture
 ```
 
-## Where to go from here
+## Development
 
-- **Move to Tak Talk**: this bot is currently developed and tested on a
-  private Discord server. Once it's solid, invite it to the Tak Talk
-  Discord server (worth giving the community a heads-up first, since it's
-  a small community and guest connections are meant for humans).
-- **Deployment**: it's self-hosted.
-- **playtak-ui deep links**: PlayTak has no shareable join/spectate URLs
-  today. A small PR to `USTakAssociation/playtak-ui` adding `?game=`/`?seek=`
-  deep links would let `/watch` and future features link straight to a game
-  instead of just narrating it.
-- **Separate project idea**: a small web app teaching new players Tak,
-  embedding PTN Ninja's board via its documented `postMessage` API. Not
-  part of this repo.
+```bash
+npm run build          # type-check and compile to dist/
+npm run dev            # run from source with ts-node
+npm run set-avatar     # upload assets/watchtak-icon.png as the bot's avatar
+```
+
+Keep secrets in `.env` (gitignored). The `data/` directory holds runtime state
+and is gitignored too.
+
+## License
+
+[MIT](LICENSE)
