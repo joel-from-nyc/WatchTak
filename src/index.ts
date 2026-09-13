@@ -1,7 +1,7 @@
 import { Client, GatewayIntentBits, Collection, TextChannel, MessageFlags } from 'discord.js';
 import dotenv from 'dotenv';
 import { commands as commandList, Command } from './commands';
-import { initPlaytak, getGameRegistry, getPlaytakClient } from './playtak/shared';
+import { initPlaytak, getGameRegistry } from './playtak/shared';
 import { registerWatcher, watchGame, getWatchedThread, reconstructThread } from './playtak/watcher';
 import { registerAnnouncer, shutdownAnnouncer } from './playtak/announcer';
 import { registerSeekToGame } from './playtak/seekToGame';
@@ -33,15 +33,15 @@ process.on('unhandledRejection', (reason) => {
 const commands = new Collection<string, Command>();
 for (const command of commandList) commands.set(command.data.name, command);
 
-client.once('ready', (readyClient) => {
+client.once('clientReady', (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
 
-  const { client: playtak, gameRegistry } = initPlaytak();
-  registerWatcher(playtak, readyClient, gameRegistry);
-  registerAnnouncer(playtak, readyClient);
-  registerSeekToGame(playtak, readyClient);
-  registerAutoPrune(playtak, readyClient);
-  registerPresence(playtak, readyClient, gameRegistry);
+  initPlaytak();
+  registerWatcher(readyClient);
+  registerAnnouncer(readyClient);
+  registerSeekToGame(readyClient);
+  registerAutoPrune(readyClient);
+  registerPresence(readyClient);
   startRatingsRefresh();
 });
 
@@ -82,7 +82,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const { thread, alreadyWatching } = await watchGame(getPlaytakClient(), interaction.channel, game);
+        const { thread, alreadyWatching } = await watchGame(interaction.channel, game);
         await interaction.editReply(
           alreadyWatching ? `This game already has a thread. Spectate: ${thread}` : `Spectate: ${thread}`,
         );

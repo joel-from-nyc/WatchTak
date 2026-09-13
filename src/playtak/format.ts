@@ -45,6 +45,14 @@ export function discordTime(atMs: number, style: 'f' | 'R' | 't' = 'f'): string 
   return `<t:${Math.floor(atMs / 1000)}:${style}>`;
 }
 
+// "9:05" from a clock value in seconds.
+export function formatSeconds(totalSeconds: number): string {
+  const clamped = Math.max(0, Math.round(totalSeconds));
+  const minutes = Math.floor(clamped / 60);
+  const seconds = clamped % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
 // "24 minutes", "1 hour 5 minutes".
 export function formatDuration(ms: number): string {
   const totalMinutes = Math.max(0, Math.round(ms / 60000));

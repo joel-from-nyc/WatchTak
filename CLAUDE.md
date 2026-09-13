@@ -20,10 +20,12 @@ file covers what an agent or contributor needs to change it safely.
   (re)connect and never sends removals for anything that ended while the bot
   was disconnected, so both reconcile against the replay ~2s after connect.
 - `watcher.ts` owns a watched game's thread: history replay on `Observe`,
-  live move posts, reconnect catch-up, low-time warnings, and the 24h
-  close/archive lifecycle. Thread names embed `(#<gameNo>)` so a restarted
-  process can recover its threads from Discord alone; a periodic sweep
-  reconciles every open thread against live state.
+  live move posts, reconnect catch-up, and the periodic sweep that
+  reconciles every open thread against live state. Three helpers hang off
+  it: `lowTime.ts` (the low-time countdown), `threadClose.ts` (the 24h
+  close/archive lifecycle, driven by a marker message in the thread), and
+  `threadLookup.ts` (finding a game's thread and reading back what it
+  shows; thread names embed `(#<gameNo>)` for this).
 - `catchup.ts` defines the ≤10-ply "Moves 3W-7B" summary messages posted
   when a thread starts mid-game. `/expand here` later edits board images onto
   them (10 is Discord's per-message attachment cap).
@@ -50,6 +52,9 @@ file covers what an agent or contributor needs to change it safely.
 
 ## Conventions
 
+- `shared.ts` owns the PlayTak singletons (connection, game registry, seek
+  registry); any module needing them calls its getters. The Discord client
+  is created in `index.ts` and passed to the `register*()` functions.
 - Strict TypeScript (`tsconfig.json`). Don't loosen it. Run `npm run check`
   (Prettier, build, tests) after any change.
 - One command per file in `src/commands/`, exporting `data` and `execute`

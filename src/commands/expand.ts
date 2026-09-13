@@ -7,7 +7,8 @@ import {
   AttachmentBuilder,
   Message,
 } from 'discord.js';
-import { parseThreadName, getActiveWatchSnapshot, attachMirrorThread } from '../playtak/watcher';
+import { getActiveWatchSnapshot, attachMirrorThread } from '../playtak/watcher';
+import { parseThreadName } from '../playtak/threadLookup';
 import { getGameRegistry } from '../playtak/shared';
 import { fetchArchivedGame } from '../playtak/gameArchive';
 import { renderBoardPng } from '../playtak/boardImage';
@@ -22,7 +23,7 @@ import {
   replayThreadName,
   parseReplayThreadName,
 } from '../playtak/catchup';
-import { codeBlock } from '../playtak/format';
+import { codeBlock, discordTime } from '../playtak/format';
 import { describeResult } from '../playtak/result';
 import { buildPtnNinjaLink } from '../playtak/ptnLink';
 
@@ -96,6 +97,13 @@ async function resolveGameRecord(gameNo: number): Promise<{ record: GameRecord }
 // One /expand at a time per game.
 const inFlightExpands = new Set<number>();
 
+// A replay build renders every board synchronously and uploads one message
+// per move at Discord's rate limit, so only one runs at a time server-wide
+// and each user may start one every REPLAY_COOLDOWN_MS.
+const REPLAY_COOLDOWN_MS = 10 * 60 * 1000;
+let replayBuildInProgress = false;
+const lastReplayStartByUser = new Map<string, number>();
+
 export async function execute(interaction: ChatInputCommandInteraction) {
   const channel = interaction.channel;
   const botId = interaction.client.user?.id;
@@ -116,14 +124,39 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     return;
   }
 
+  if (interaction.options.getSubcommand() === 'here') {
+    inFlightExpands.add(parsed.gameNo);
+    try {
+      await expandHere(interaction, channel, parsed.gameNo);
+    } finally {
+      inFlightExpands.delete(parsed.gameNo);
+    }
+    return;
+  }
+
+  if (replayBuildInProgress) {
+    await interaction.reply({
+      content: 'Another replay thread is being built right now - try again when it finishes.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  const lastStart = lastReplayStartByUser.get(interaction.user.id);
+  if (lastStart !== undefined && Date.now() - lastStart < REPLAY_COOLDOWN_MS) {
+    await interaction.reply({
+      content: `You can start another replay thread ${discordTime(lastStart + REPLAY_COOLDOWN_MS, 'R')}.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  replayBuildInProgress = true;
+  lastReplayStartByUser.set(interaction.user.id, Date.now());
   inFlightExpands.add(parsed.gameNo);
   try {
-    if (interaction.options.getSubcommand() === 'here') {
-      await expandHere(interaction, channel, parsed.gameNo);
-    } else {
-      await expandNew(interaction, channel, parsed.gameNo);
-    }
+    await expandNew(interaction, channel, parsed.gameNo);
   } finally {
+    replayBuildInProgress = false;
     inFlightExpands.delete(parsed.gameNo);
   }
 }

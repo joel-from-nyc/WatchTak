@@ -1,8 +1,7 @@
 import { Client, TextChannel, ThreadChannel, AttachmentBuilder, Message } from 'discord.js';
-import { PlaytakClient } from './client';
+import { getPlaytakClient, getGameRegistry } from './shared';
 import { GameListEntry, PlaytakEvent } from './protocol';
-import { GameRegistry } from './registry';
-import { placeToPtn, spreadToPtn, moveLabelToPly } from './ptn';
+import { placeToPtn, spreadToPtn } from './ptn';
 import { renderBoardPng } from './boardImage';
 import { describeResult } from './result';
 import { buildPtnNinjaLink } from './ptnLink';
@@ -10,51 +9,28 @@ import {
   formatGameType,
   formatKomi,
   formatPlayerName,
+  formatSeconds,
   discordTime,
   formatDuration,
   codeBlock,
   alignedLine,
 } from './format';
-import {
-  buildChunkContents,
-  moveOnlyText,
-  parseChunkHeader,
-  INLINE_CATCHUP_MAX_PLIES,
-  MOVE_LABEL_WIDTH,
-} from './catchup';
+import { buildChunkContents, moveOnlyText, INLINE_CATCHUP_MAX_PLIES, MOVE_LABEL_WIDTH } from './catchup';
 import { fetchArchivedGame } from './gameArchive';
 import { getRating } from './ratings';
 import { getGameStartedAt } from './gameTimes';
+import { clearLowTimeTimer, scheduleLowTimeWarning, resolveLowTimeWarning } from './lowTime';
+import { findCloseMarker, reconcileClose, scheduleClose } from './threadClose';
+import { THREAD_NAME_PATTERN, threadName, findExistingThread, findKnownPlyCount } from './threadLookup';
 
 // On Observe, PlayTak replays the game's full move history using the same
 // message shapes as live moves. Moves are buffered as history until none has
 // arrived for this long; only then does live posting start.
 const HISTORY_SETTLE_MS = 500;
 
-const THREAD_CLOSE_DELAY_MS = 24 * 60 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 
-// A finished game's thread carries one close-lifecycle message, in one of two
-// states: the pending warning (with a `<t:...:R>` deadline), or the archived
-// record closeThread() rewrites it into.
-const CLOSE_WARNING_PREFIX = 'This thread will be archived';
-const CLOSE_ARCHIVED_PREFIX = 'This thread was archived on';
-const CLOSE_MARKER_PATTERN = new RegExp(`^(?:${CLOSE_WARNING_PREFIX}|${CLOSE_ARCHIVED_PREFIX})`);
-
-// Extracts the close deadline (Unix seconds) from a pending warning message.
-const CLOSE_WARNING_DEADLINE_PATTERN = /<t:(\d+):R>/;
-
-// A warning is only rewritten when its deadline moves by more than this.
-const CLOSE_DEADLINE_SLOP_MS = 60 * 1000;
-
-// Every watch thread's name ends in "(#<gameNo>)", so threads can be matched
-// back to games from Discord's thread list alone after a restart.
-const THREAD_NAME_PATTERN = /\(#(\d+)\)$/;
-
-// A player is warned once their clock drops below this.
-const LOW_TIME_THRESHOLD_SECONDS = 60;
-
-interface WatchState {
+export interface WatchState {
   gameNo: number;
   thread: ThreadChannel;
   white: string;
@@ -77,16 +53,10 @@ interface WatchState {
   historyMode: 'newThread' | 'reconnect' | 'resume';
   // Ply count the thread already shows ('reconnect' mode only).
   catchupFromPly?: number;
-  // The live low-time countdown message, if one is showing. Only the player
-  // on the clock can have one. Cleared by resolveLowTimeWarning().
+  // Low-time warning state; see lowTime.ts.
   lowTimeWarning?: { message: Message; color: 'white' | 'black' };
-  // Fires when the player on the clock crosses the threshold.
   lowTimeTimer?: NodeJS.Timeout;
-  // Incremented each time a warning is resolved, so a warning whose send was
-  // still in flight at that moment can detect it is already stale.
   lowTimeGeneration?: number;
-  // Whether the last resolution was caused by the warned player's own move
-  // (which affects the clock value shown - see staleWarningText()).
   lastResolutionAfterMove?: boolean;
   // A /expand new replay thread receiving a copy of every post. In-memory
   // only; a restart drops the link.
@@ -147,25 +117,6 @@ export function attachMirrorThread(gameNo: number, thread: ThreadChannel): boole
   return true;
 }
 
-function threadName(white: string, black: string, gameNo: number): string {
-  return `${white} vs ${black} (#${gameNo})`;
-}
-
-// Reverses threadName(). PlayTak usernames contain no spaces, so " vs " is an
-// unambiguous separator.
-export function parseThreadName(name: string): { white: string; black: string; gameNo: number } | undefined {
-  const match = /^(.+) vs (.+) \(#(\d+)\)$/.exec(name);
-  if (!match) return undefined;
-  return { white: match[1], black: match[2], gameNo: Number(match[3]) };
-}
-
-function formatSeconds(totalSeconds: number): string {
-  const clamped = Math.max(0, Math.round(totalSeconds));
-  const minutes = Math.floor(clamped / 60);
-  const seconds = clamped % 60;
-  return `${minutes}:${String(seconds).padStart(2, '0')}`;
-}
-
 // "White Time"/"Black Time" lines, or none if the clocks are not known yet.
 function timeLines(state: WatchState): string[] {
   if (state.whiteSeconds === undefined || state.blackSeconds === undefined) return [];
@@ -221,112 +172,6 @@ function watchStartText(options: WatchStartOptions): string {
   );
   const block = codeBlock(lines);
   return options.startedAtMs === undefined ? block : `${block}\nStarted ${discordTime(options.startedAtMs)}`;
-}
-
-function clearLowTimeTimer(state: WatchState): void {
-  if (state.lowTimeTimer) clearTimeout(state.lowTimeTimer);
-  state.lowTimeTimer = undefined;
-}
-
-// Schedules the low-time warning for the player on the clock. PlayTak only
-// sends clock updates at move boundaries, never while a player is thinking,
-// so the moment they cross the threshold is computed from their clock at turn
-// start rather than waited for.
-function scheduleLowTimeWarning(state: WatchState): void {
-  clearLowTimeTimer(state);
-  if (!state.live) return;
-  // Clocks do not run until both players have made their opening move.
-  if (state.plies.length < 2) return;
-
-  const isWhite = state.plies.length % 2 === 0;
-  const seconds = isWhite ? state.whiteSeconds : state.blackSeconds;
-  if (seconds === undefined) return;
-
-  const flagAtMs = Date.now() + seconds * 1000;
-  const delayMs = Math.max(0, (seconds - LOW_TIME_THRESHOLD_SECONDS) * 1000);
-  const generation = state.lowTimeGeneration ?? 0;
-  state.lowTimeTimer = setTimeout(() => {
-    state.lowTimeTimer = undefined;
-    postLowTimeWarning(state, isWhite, flagAtMs, generation).catch((err) => {
-      console.error(`Failed to post low-time warning for game #${state.gameNo}:`, err);
-    });
-  }, delayMs);
-}
-
-// Final text for a resolved warning. When the warned player's own move ended
-// it (`afterMove`), the latest clock value already includes the increment
-// credited for that move, so the increment is subtracted to show the clock as
-// it stood when they moved.
-function staleWarningText(state: WatchState, color: 'white' | 'black', afterMove: boolean): string {
-  const player = color === 'white' ? state.white : state.black;
-  const rawSeconds = color === 'white' ? state.whiteSeconds : state.blackSeconds;
-  if (rawSeconds === undefined) return `${player} was running low on time.`;
-  const seconds = afterMove ? Math.max(0, rawSeconds - state.incrementSeconds) : rawSeconds;
-  return `${player} was running low on time (${formatSeconds(seconds)} left).`;
-}
-
-// Posts the countdown (`<t:...:R>` ticks client-side with no further edits).
-// If the warning was resolved while the send was in flight - the generation
-// moved on - the new message is edited straight to its final text, since
-// nothing else will ever resolve it.
-async function postLowTimeWarning(
-  state: WatchState,
-  isWhite: boolean,
-  flagAtMs: number,
-  generation: number,
-): Promise<void> {
-  if (state.lowTimeWarning) return;
-
-  const player = isWhite ? state.white : state.black;
-  const message = await state.thread
-    .send(`${player} will lose on time <t:${Math.floor(flagAtMs / 1000)}:R>`)
-    .catch((err) => {
-      console.error(`Failed to post low-time warning for game #${state.gameNo}:`, err);
-      return null;
-    });
-  if (!message) return;
-
-  if ((state.lowTimeGeneration ?? 0) !== generation) {
-    const text = staleWarningText(state, isWhite ? 'white' : 'black', state.lastResolutionAfterMove ?? false);
-    await message.edit(text).catch(() => {});
-    return;
-  }
-
-  state.lowTimeWarning = { message, color: isWhite ? 'white' : 'black' };
-}
-
-// Replaces a live countdown with static text. Always bumps the generation,
-// even with no warning showing, to catch one still in flight.
-async function resolveLowTimeWarning(state: WatchState, afterMove: boolean): Promise<void> {
-  state.lowTimeGeneration = (state.lowTimeGeneration ?? 0) + 1;
-  state.lastResolutionAfterMove = afterMove;
-  clearLowTimeTimer(state);
-  const warning = state.lowTimeWarning;
-  if (!warning) return;
-  state.lowTimeWarning = undefined;
-  await warning.message.edit(staleWarningText(state, warning.color, afterMove)).catch(() => {});
-}
-
-// Archives and locks the thread, then rewrites the close marker to record
-// when that happened. Archive and lock go in one edit so a message cannot
-// land between them and reopen the thread. Locking needs Manage Threads;
-// if the combined edit is refused, archive alone. Safe to call repeatedly.
-async function closeThread(thread: ThreadChannel, marker: CloseMarker | undefined): Promise<void> {
-  const archived = await thread
-    .edit({ archived: true, locked: true })
-    .then(() => true)
-    .catch(async (err) => {
-      console.error(`Failed to archive+lock thread ${thread.id}, trying archive alone:`, err);
-      return thread
-        .setArchived(true)
-        .then(() => true)
-        .catch((fallbackErr) => {
-          console.error(`Failed to archive thread ${thread.id}:`, fallbackErr);
-          return false;
-        });
-    });
-  if (!archived || !marker || marker.alreadyArchived) return;
-  await marker.message.edit(`${CLOSE_ARCHIVED_PREFIX} <t:${Math.floor(Date.now() / 1000)}:D>.`).catch(() => {});
 }
 
 // Posts text and board image as one message. `plies` defaults to the current
@@ -408,61 +253,14 @@ function armSettleTimer(state: WatchState): void {
   }, HISTORY_SETTLE_MS);
 }
 
-function beginObserving(playtak: PlaytakClient, state: WatchState): void {
+function beginObserving(state: WatchState): void {
   activeWatches.set(state.gameNo, state);
   watchedThreads.set(state.gameNo, state.thread);
   armSettleTimer(state);
-  playtak.send(`Observe ${state.gameNo}`);
+  getPlaytakClient().send(`Observe ${state.gameNo}`);
 }
 
-function warningText(deadlineMs: number): string {
-  return `${CLOSE_WARNING_PREFIX} <t:${Math.floor(deadlineMs / 1000)}:R>.`;
-}
-
-// Runs reconcileClose() at `atMs`. The marker is re-read at that point rather
-// than trusted from when the timer was armed, since the deadline may have
-// moved; a missing marker is left for the sweep.
-function armCloseTimer(thread: ThreadChannel, atMs: number): void {
-  setTimeout(
-    () => {
-      findCloseMarker(thread)
-        .then((marker) => (marker ? reconcileClose(thread, marker) : undefined))
-        .catch((err) => console.error(`Failed to close thread ${thread.id} on schedule:`, err));
-    },
-    Math.max(0, atMs - Date.now()),
-  );
-}
-
-async function scheduleClose(thread: ThreadChannel): Promise<void> {
-  const deadlineMs = Date.now() + THREAD_CLOSE_DELAY_MS;
-  await thread.send(warningText(deadlineMs)).catch(() => {});
-  armCloseTimer(thread, deadlineMs);
-}
-
-// When the thread should close: 24h after its most recent message, or the
-// deadline its warning already shows, whichever is later. Ongoing discussion
-// keeps pushing the close out, and a reopened thread gets a fresh 24h.
-function closeDueAt(marker: CloseMarker): number {
-  const fromActivity = marker.lastActivityMs + THREAD_CLOSE_DELAY_MS;
-  return marker.deadlineMs === undefined ? fromActivity : Math.max(marker.deadlineMs, fromActivity);
-}
-
-// Closes the thread if due; otherwise rewrites the marker in place when its
-// deadline has moved (or it still reads "was archived" after a reopen) and
-// re-arms the timer. Shared by the close timer and the sweep.
-async function reconcileClose(thread: ThreadChannel, marker: CloseMarker): Promise<void> {
-  const dueAt = closeDueAt(marker);
-  if (Date.now() >= dueAt) {
-    await closeThread(thread, marker);
-    return;
-  }
-  const shown = marker.alreadyArchived ? undefined : marker.deadlineMs;
-  if (shown !== undefined && Math.abs(dueAt - shown) <= CLOSE_DEADLINE_SLOP_MS) return;
-  await marker.message.edit(warningText(dueAt)).catch(() => {});
-  armCloseTimer(thread, dueAt);
-}
-
-async function handleGameEnd(playtak: PlaytakClient, state: WatchState, resultText: string): Promise<void> {
+async function handleGameEnd(state: WatchState, resultText: string): Promise<void> {
   // A settle timer still pending would post a board after the game-over.
   if (state.settleTimer) clearTimeout(state.settleTimer);
   state.settleTimer = undefined;
@@ -483,13 +281,13 @@ async function handleGameEnd(playtak: PlaytakClient, state: WatchState, resultTe
   if (state.mirrorThread) await scheduleClose(state.mirrorThread);
 
   activeWatches.delete(state.gameNo);
-  playtak.send(`Unobserve ${state.gameNo}`);
+  getPlaytakClient().send(`Unobserve ${state.gameNo}`);
 }
 
 // Handles one PlayTak event. Called strictly one at a time (see
 // registerWatcher()) so two events for the same game never read and mutate
 // the same WatchState concurrently.
-async function handleWatcherEvent(playtak: PlaytakClient, event: PlaytakEvent): Promise<void> {
+async function handleWatcherEvent(event: PlaytakEvent): Promise<void> {
   if (
     event.type !== 'gamePlace' &&
     event.type !== 'gameSpread' &&
@@ -511,11 +309,11 @@ async function handleWatcherEvent(playtak: PlaytakClient, event: PlaytakEvent): 
   }
 
   if (event.type === 'gameOver') {
-    await handleGameEnd(playtak, state, describeResult(event.result, state.white, state.black));
+    await handleGameEnd(state, describeResult(event.result, state.white, state.black));
     return;
   }
   if (event.type === 'gameAbandoned') {
-    await handleGameEnd(playtak, state, `${event.quittingPlayer} abandoned the game.`);
+    await handleGameEnd(state, `${event.quittingPlayer} abandoned the game.`);
     return;
   }
 
@@ -576,12 +374,14 @@ async function handleWatcherEvent(playtak: PlaytakClient, event: PlaytakEvent): 
   scheduleLowTimeWarning(state);
 }
 
-export function registerWatcher(playtak: PlaytakClient, discordClient: Client, registry: GameRegistry): void {
+export function registerWatcher(discordClient: Client): void {
+  const playtak = getPlaytakClient();
+
   // Events are chained through one promise so handlers never overlap.
   let eventQueue: Promise<void> = Promise.resolve();
   playtak.on('event', (event) => {
     eventQueue = eventQueue
-      .then(() => handleWatcherEvent(playtak, event))
+      .then(() => handleWatcherEvent(event))
       .catch((err) => {
         console.error('Error handling PlayTak event in watcher:', err);
       });
@@ -601,7 +401,7 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
       state.live = false;
       state.plies = [];
       clearLowTimeTimer(state);
-      beginObserving(playtak, state);
+      beginObserving(state);
     }
   });
 
@@ -609,7 +409,7 @@ export function registerWatcher(playtak: PlaytakClient, discordClient: Client, r
   // lands), then periodically.
   playtak.once('connected', () => {
     const runSweep = () => {
-      sweepThreads(discordClient, playtak, registry).catch((err) => {
+      sweepThreads(discordClient).catch((err) => {
         console.error('Thread sweep failed:', err);
       });
     };
@@ -632,14 +432,13 @@ async function isThreadUsable(thread: ThreadChannel): Promise<boolean> {
 // Reuses a thread from before a restart if Discord still has one for this
 // game; otherwise creates a new thread and starts observing.
 async function createOrReattachThread(
-  playtak: PlaytakClient,
   parentChannel: TextChannel,
   game: GameListEntry,
 ): Promise<{ thread: ThreadChannel; alreadyWatching: boolean }> {
   const botId = parentChannel.client.user?.id;
   const found = await findExistingThread(parentChannel, game.gameNo, botId, false);
   if (found) {
-    await resumeWatchingThread(playtak, found, game);
+    await resumeWatchingThread(found, game);
     return { thread: found, alreadyWatching: true };
   }
 
@@ -675,7 +474,7 @@ async function createOrReattachThread(
     live: false,
     historyMode: 'newThread',
   };
-  beginObserving(playtak, state);
+  beginObserving(state);
 
   return { thread, alreadyWatching: false };
 }
@@ -683,7 +482,6 @@ async function createOrReattachThread(
 // One thread per game: reuse the active watch's thread, or an in-flight
 // creation, or a thread Discord already has, before creating a new one.
 export async function watchGame(
-  playtak: PlaytakClient,
   parentChannel: TextChannel,
   game: GameListEntry,
 ): Promise<{ thread: ThreadChannel; alreadyWatching: boolean }> {
@@ -695,7 +493,7 @@ export async function watchGame(
     if (existing.settleTimer) clearTimeout(existing.settleTimer);
     clearLowTimeTimer(existing);
     activeWatches.delete(game.gameNo);
-    playtak.send(`Unobserve ${game.gameNo}`);
+    getPlaytakClient().send(`Unobserve ${game.gameNo}`);
   }
 
   const inFlight = inFlightWatches.get(game.gameNo);
@@ -704,7 +502,7 @@ export async function watchGame(
     return { thread, alreadyWatching: true };
   }
 
-  const promise = createOrReattachThread(playtak, parentChannel, game);
+  const promise = createOrReattachThread(parentChannel, game);
   inFlightWatches.set(game.gameNo, promise);
   try {
     return await promise;
@@ -798,95 +596,12 @@ async function createReconstructedThread(
   return thread;
 }
 
-// A thread's close-lifecycle message and what the close decision needs from it.
-interface CloseMarker {
-  message: Message;
-  alreadyArchived: boolean;
-  // Deadline shown by a pending warning. Undefined once archived or if
-  // unparseable, in which case closeDueAt() uses activity alone, so a broken
-  // marker can only delay a close.
-  deadlineMs?: number;
-  // Timestamp of the thread's newest message.
-  lastActivityMs: number;
-}
-
-// Finds the thread's close marker among its last 100 messages (post-game
-// discussion can run long, and missing the marker would post a duplicate).
-async function findCloseMarker(thread: ThreadChannel): Promise<CloseMarker | undefined> {
-  const recent = await thread.messages.fetch({ limit: 100 }).catch(() => null);
-  const message = recent?.find((m) => CLOSE_MARKER_PATTERN.test(m.content));
-  if (!recent || !message) return undefined;
-  const lastActivityMs = Math.max(...recent.map((m) => m.createdTimestamp));
-  if (message.content.startsWith(CLOSE_ARCHIVED_PREFIX)) return { message, alreadyArchived: true, lastActivityMs };
-
-  const match = CLOSE_WARNING_DEADLINE_PATTERN.exec(message.content);
-  return {
-    message,
-    alreadyArchived: false,
-    deadlineMs: match ? Number(match[1]) * 1000 : undefined,
-    lastActivityMs,
-  };
-}
-
-// The "Move: <number><W|B>. <ptn>" line of a move post (see moveText()).
-const MOVE_LINE_PATTERN = /^Move:\s+(\d+)([WB])\b/m;
-
-// Recovers how many plies a thread already shows from its own messages: the
-// highest ply in any move post or chunk summary header. Returns undefined
-// when nothing carries a ply number.
-async function findKnownPlyCount(thread: ThreadChannel): Promise<number | undefined> {
-  const recent = await thread.messages.fetch({ limit: 100 }).catch(() => null);
-  if (!recent) return undefined;
-
-  let highestPly: number | undefined;
-  for (const message of recent.values()) {
-    const match = MOVE_LINE_PATTERN.exec(message.content);
-    if (match) {
-      const ply = moveLabelToPly(Number(match[1]), match[2] as 'W' | 'B');
-      if (highestPly === undefined || ply > highestPly) highestPly = ply;
-    }
-    const chunk = parseChunkHeader(message.content);
-    if (chunk && (highestPly === undefined || chunk.toPly > highestPly)) highestPly = chunk.toPly;
-  }
-  return highestPly === undefined ? undefined : highestPly + 1;
-}
-
-const MAX_ARCHIVED_THREAD_PAGES = 5;
-
-// Finds this bot's thread for `gameNo` in the channel. Active threads are
-// always checked; archived ones only when `includeArchived` is set, since
-// paging through them costs extra API calls.
-async function findExistingThread(
-  parentChannel: TextChannel,
-  gameNo: number,
-  botId: string | undefined,
-  includeArchived: boolean,
-): Promise<ThreadChannel | undefined> {
-  const active = await parentChannel.threads.fetchActive().catch(() => null);
-  for (const thread of active?.threads.values() ?? []) {
-    if (thread.ownerId === botId && parseThreadName(thread.name)?.gameNo === gameNo) return thread;
-  }
-  if (!includeArchived) return undefined;
-
-  let before: ThreadChannel | undefined;
-  for (let page = 0; page < MAX_ARCHIVED_THREAD_PAGES; page++) {
-    const archived = await parentChannel.threads.fetchArchived({ limit: 100, before }).catch(() => null);
-    if (!archived || archived.threads.size === 0) break;
-    for (const thread of archived.threads.values()) {
-      if (thread.ownerId === botId && parseThreadName(thread.name)?.gameNo === gameNo) return thread;
-    }
-    before = archived.threads.last();
-    if (!archived.hasMore) break;
-  }
-  return undefined;
-}
-
 // Starts observing a game whose thread already exists. What the thread
 // already shows is read from its message history so the catch-up covers
 // only the moves it is missing.
-async function resumeWatchingThread(playtak: PlaytakClient, thread: ThreadChannel, game: GameListEntry): Promise<void> {
+async function resumeWatchingThread(thread: ThreadChannel, game: GameListEntry): Promise<void> {
   const knownPlyCount = await findKnownPlyCount(thread);
-  beginObserving(playtak, {
+  beginObserving({
     gameNo: game.gameNo,
     thread,
     white: game.white,
@@ -906,13 +621,10 @@ async function resumeWatchingThread(playtak: PlaytakClient, thread: ThreadChanne
 // - Game still active but not watched: resume watching it.
 // - Game over: post the close warning if there is none, otherwise let
 //   reconcileClose() close it when due or keep its deadline current.
-export async function sweepThreads(
-  discordClient: Client,
-  playtak: PlaytakClient,
-  registry: GameRegistry,
-): Promise<void> {
+export async function sweepThreads(discordClient: Client): Promise<void> {
   const botId = discordClient.user?.id;
   if (!botId) return;
+  const registry = getGameRegistry();
 
   for (const guild of discordClient.guilds.cache.values()) {
     const active = await guild.channels.fetchActiveThreads().catch((err) => {
@@ -930,7 +642,7 @@ export async function sweepThreads(
       const game = registry.find(gameNo);
 
       if (game) {
-        if (!activeWatches.has(gameNo)) await resumeWatchingThread(playtak, thread, game);
+        if (!activeWatches.has(gameNo)) await resumeWatchingThread(thread, game);
         continue;
       }
 

@@ -6,7 +6,7 @@ import {
   MessageFlags,
 } from 'discord.js';
 import { GameListEntry } from '../playtak/protocol';
-import { getGameRegistry, getPlaytakClient } from '../playtak/shared';
+import { getGameRegistry } from '../playtak/shared';
 import { buildGamesListReply } from '../playtak/gamesReply';
 import { watchGame } from '../playtak/watcher';
 import { getRating } from '../playtak/ratings';
@@ -103,7 +103,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   }
 
   await interaction.deferReply();
-  const { thread, alreadyWatching } = await watchGame(getPlaytakClient(), interaction.channel, game);
+  const { thread, alreadyWatching } = await watchGame(interaction.channel, game);
 
   if (alreadyWatching) {
     // Swap the public placeholder for a private link, so repeat requests for
