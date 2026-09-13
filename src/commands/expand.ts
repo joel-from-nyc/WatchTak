@@ -16,7 +16,7 @@ import {
   parseChunkHeader,
   filledChunkContent,
   markChunkStale,
-  expectedChunkMoveList,
+  chunkMoveList,
   moveOnlyText,
   STALE_CHUNK_NOTE,
   replayThreadName,
@@ -30,10 +30,14 @@ export const data = new SlashCommandBuilder()
   .setName('expand')
   .setDescription("Draw the boards a game thread's catch-up summaries skipped, in place or in a new replay thread")
   .addSubcommand((sub) =>
-    sub.setName('here').setDescription("Draw the missing boards onto this thread's catch-up summaries, editing them in place"),
+    sub
+      .setName('here')
+      .setDescription("Draw the missing boards onto this thread's catch-up summaries, editing them in place"),
   )
   .addSubcommand((sub) =>
-    sub.setName('new').setDescription('Build a replay thread with every move and board of this game, then follow it live'),
+    sub
+      .setName('new')
+      .setDescription('Build a replay thread with every move and board of this game, then follow it live'),
   );
 
 // Pages of thread messages to scan for unfilled chunk summaries.
@@ -84,7 +88,9 @@ async function resolveGameRecord(gameNo: number): Promise<{ record: GameRecord }
     };
   }
 
-  return { error: "Couldn't find a record of this game. If it just ended, the archive may need a minute - try again shortly." };
+  return {
+    error: "Couldn't find a record of this game. If it just ended, the archive may need a minute - try again shortly.",
+  };
 }
 
 // One /expand at a time per game.
@@ -124,7 +130,11 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
 // Edits one board image per ply onto every unfilled chunk summary in the
 // thread. Attachments are in ply order and each highlights its own move.
-async function expandHere(interaction: ChatInputCommandInteraction, thread: AnyThreadChannel, gameNo: number): Promise<void> {
+async function expandHere(
+  interaction: ChatInputCommandInteraction,
+  thread: AnyThreadChannel,
+  gameNo: number,
+): Promise<void> {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const resolved = await resolveGameRecord(gameNo);
@@ -153,7 +163,9 @@ async function expandHere(interaction: ChatInputCommandInteraction, thread: AnyT
   }
 
   if (chunks.length === 0) {
-    await interaction.editReply('Nothing to expand here - every catch-up summary already has boards (or there are none).');
+    await interaction.editReply(
+      'Nothing to expand here - every catch-up summary already has boards (or there are none).',
+    );
     return;
   }
 
@@ -165,7 +177,7 @@ async function expandHere(interaction: ChatInputCommandInteraction, thread: AnyT
   for (const { message, fromPly, toPly } of chunks) {
     // If a takeback rewrote the moves this chunk lists, its boards would be
     // wrong: mark it stale instead.
-    const rewritten = toPly >= plies.length || !message.content.includes(expectedChunkMoveList(plies, fromPly, toPly));
+    const rewritten = toPly >= plies.length || !message.content.includes(chunkMoveList(plies, fromPly, toPly));
     if (rewritten) {
       await message.edit(markChunkStale(message.content)).catch(() => {});
       skipped.push(`${plyToMoveLabel(fromPly)}-${plyToMoveLabel(toPly)}`);
@@ -192,7 +204,9 @@ async function expandHere(interaction: ChatInputCommandInteraction, thread: AnyT
 
   const parts: string[] = [];
   if (filled > 0) {
-    parts.push(`Drew ${boards} board${boards === 1 ? '' : 's'} onto ${filled} catch-up summar${filled === 1 ? 'y' : 'ies'}.`);
+    parts.push(
+      `Drew ${boards} board${boards === 1 ? '' : 's'} onto ${filled} catch-up summar${filled === 1 ? 'y' : 'ies'}.`,
+    );
   }
   if (skipped.length > 0) {
     parts.push(`Skipped moves ${skipped.join(', ')} - a takeback rewrote them after their summary was posted.`);
@@ -204,7 +218,11 @@ async function expandHere(interaction: ChatInputCommandInteraction, thread: AnyT
 // Builds a replay thread with one message and board per move, then attaches
 // it as the watch's live mirror if the game is still in progress. Replies
 // publicly, since the link is useful to everyone in the thread.
-async function expandNew(interaction: ChatInputCommandInteraction, thread: AnyThreadChannel, gameNo: number): Promise<void> {
+async function expandNew(
+  interaction: ChatInputCommandInteraction,
+  thread: AnyThreadChannel,
+  gameNo: number,
+): Promise<void> {
   await interaction.deferReply();
   // Failures replace the public placeholder with a private message.
   const fail = async (content: string) => {
@@ -254,7 +272,9 @@ async function expandNew(interaction: ChatInputCommandInteraction, thread: AnyTh
     autoArchiveDuration: 1440,
   });
 
-  await interaction.editReply(`Building a replay thread (${record.plies.length} move${record.plies.length === 1 ? '' : 's'} so far): ${replayThread}`);
+  await interaction.editReply(
+    `Building a replay thread (${record.plies.length} move${record.plies.length === 1 ? '' : 's'} so far): ${replayThread}`,
+  );
 
   await replayThread
     .send(
@@ -289,8 +309,7 @@ async function expandNew(interaction: ChatInputCommandInteraction, thread: AnyTh
       }
 
       // A takeback during the build rewrites posted plies: stop.
-      const stillMatches =
-        current.length >= postedPlies.length && postedPlies.every((ptn, i) => current[i] === ptn);
+      const stillMatches = current.length >= postedPlies.length && postedPlies.every((ptn, i) => current[i] === ptn);
       if (!stillMatches) {
         await replayThread.send(
           `${codeBlock(['A move was taken back while this replay was being built - stopping here.'])}\nFollow the game thread instead: ${thread}`,

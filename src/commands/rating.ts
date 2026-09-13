@@ -4,8 +4,12 @@ import { getRatingRule, setRatingRule, RatingRule } from '../playtak/ratingStore
 export const data = new SlashCommandBuilder()
   .setName('rating')
   .setDescription('Only show games with a human at this rating or above (bots must meet their own minimum)')
-  .addIntegerOption((option) => option.setName('human').setDescription('Minimum rating for the human side').setMinValue(0))
-  .addIntegerOption((option) => option.setName('bot').setDescription('Minimum rating for a bot opponent').setMinValue(0))
+  .addIntegerOption((option) =>
+    option.setName('human').setDescription('Minimum rating for the human side').setMinValue(0),
+  )
+  .addIntegerOption((option) =>
+    option.setName('bot').setDescription('Minimum rating for a bot opponent').setMinValue(0),
+  )
   .addBooleanOption((option) => option.setName('off').setDescription('Clear the current rating filter'))
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels);
 

@@ -5,6 +5,7 @@ import { formatPlayerName, formatPlayerNameBold } from './format';
 const RATINGLIST_URL = 'https://playtak.com/ratinglist.json';
 
 const REFRESH_INTERVAL_MS = 20 * 60 * 1000;
+const FETCH_TIMEOUT_MS = 10_000;
 
 // One row: [name(s), rating, activeRating, gamesPlayed, isBot]. The name
 // field can hold several space-separated aliases for one renamed account.
@@ -25,7 +26,7 @@ let loadedOnce = false;
 
 async function refreshRatings(): Promise<void> {
   try {
-    const response = await fetch(RATINGLIST_URL);
+    const response = await fetch(RATINGLIST_URL, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!response.ok) return;
     const rows: RatingRow[] = await response.json();
 

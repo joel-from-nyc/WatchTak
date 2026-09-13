@@ -168,13 +168,21 @@ export function isGameNoticeAllowed(channelId: string, game: GameListEntry, seek
 // Channels that would post a game-started notice for `game` right now.
 export function listAnnouncingChannelIds(game: GameListEntry, seek: Seek | undefined): string[] {
   return [...announcements.entries()]
-    .filter(([channelId, state]) => modeAllowsGame(state.mode, game, seek, getShowBots(channelId), getRatingRule(channelId)))
+    .filter(([channelId, state]) =>
+      modeAllowsGame(state.mode, game, seek, getShowBots(channelId), getRatingRule(channelId)),
+    )
     .map(([channelId]) => channelId);
 }
 
 // Same decision from player names alone, for /prune's re-check of old notices.
 export function wouldGameNoticeBeAllowed(channelId: string, white: string, black: string): boolean {
-  return modeAllowsGame(getAnnounceMode(channelId), { white, black }, undefined, getShowBots(channelId), getRatingRule(channelId));
+  return modeAllowsGame(
+    getAnnounceMode(channelId),
+    { white, black },
+    undefined,
+    getShowBots(channelId),
+    getRatingRule(channelId),
+  );
 }
 
 // Whether `messageId` is a seek announcement this module still tracks.
@@ -279,7 +287,11 @@ async function clearStaleAnnouncements(channel: TextChannel, botId: string): Pro
 }
 
 // Clears stale announcements, then posts every currently open human seek.
-async function activateChannel(discordClient: Client, channel: TextChannel, mode: AnnounceMode): Promise<Map<number, string>> {
+async function activateChannel(
+  discordClient: Client,
+  channel: TextChannel,
+  mode: AnnounceMode,
+): Promise<Map<number, string>> {
   const tracked = new Map<number, string>();
   announcements.set(channel.id, { tracked, mode });
 
@@ -293,7 +305,11 @@ async function activateChannel(discordClient: Client, channel: TextChannel, mode
 
 // No-op if already on. Persistence is the caller's job (see
 // recordConfirmationMessage()).
-export async function turnOnAnnounce(discordClient: Client, channelId: string, mode: AnnounceMode = 'on'): Promise<void> {
+export async function turnOnAnnounce(
+  discordClient: Client,
+  channelId: string,
+  mode: AnnounceMode = 'on',
+): Promise<void> {
   if (announcements.has(channelId)) return;
 
   const channel = await fetchTextChannel(discordClient, channelId);
@@ -327,7 +343,11 @@ export function recordConfirmationMessage(channelId: string, messageId: string, 
 
 // Drops announcements for seeks that are no longer open after a reconnect.
 async function reconcile(discordClient: Client): Promise<void> {
-  const openSeekIds = new Set(getSeekRegistry().list().map((seek) => seek.id));
+  const openSeekIds = new Set(
+    getSeekRegistry()
+      .list()
+      .map((seek) => seek.id),
+  );
 
   for (const [channelId, { tracked }] of announcements) {
     const channel = await fetchTextChannel(discordClient, channelId);

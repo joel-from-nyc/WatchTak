@@ -71,7 +71,9 @@ export function parseChunkHeader(content: string): ChunkRange | undefined {
   };
 }
 
-function chunkMoveList(allPlies: string[], fromPly: number, toPly: number): string {
+// The move-list text a chunk covering [fromPly, toPly] carries. /expand
+// compares it against a chunk's current content to detect a takeback.
+export function chunkMoveList(allPlies: string[], fromPly: number, toPly: number): string {
   return formatPtnMoveList(allPlies.slice(fromPly, toPly + 1), fromPly);
 }
 
@@ -92,12 +94,6 @@ export function filledChunkContent(allPlies: string[], fromPly: number, toPly: n
 
 export function markChunkStale(content: string): string {
   return content.replace(CHUNK_HINT, STALE_CHUNK_NOTE);
-}
-
-// The move-list text a chunk covering [fromPly, toPly] carries. /expand
-// compares it against the chunk's current content to detect a takeback.
-export function expectedChunkMoveList(allPlies: string[], fromPly: number, toPly: number): string {
-  return chunkMoveList(allPlies, fromPly, toPly);
 }
 
 // Splits everything from `fromPly` onward into unfilled chunk messages.

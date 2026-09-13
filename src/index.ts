@@ -1,24 +1,6 @@
-import {
-  Client,
-  GatewayIntentBits,
-  Collection,
-  ChatInputCommandInteraction,
-  AutocompleteInteraction,
-  TextChannel,
-  MessageFlags,
-} from 'discord.js';
+import { Client, GatewayIntentBits, Collection, TextChannel, MessageFlags } from 'discord.js';
 import dotenv from 'dotenv';
-import * as ping from './commands/ping';
-import * as list from './commands/list';
-import * as watch from './commands/watch';
-import * as help from './commands/help';
-import * as seeks from './commands/seeks';
-import * as spectate from './commands/spectate';
-import * as announce from './commands/announce';
-import * as showbots from './commands/showbots';
-import * as rating from './commands/rating';
-import * as prune from './commands/prune';
-import * as expand from './commands/expand';
+import { commands as commandList, Command } from './commands';
 import { initPlaytak, getGameRegistry, getPlaytakClient } from './playtak/shared';
 import { registerWatcher, watchGame, getWatchedThread, reconstructThread } from './playtak/watcher';
 import { registerAnnouncer, shutdownAnnouncer } from './playtak/announcer';
@@ -48,24 +30,8 @@ process.on('unhandledRejection', (reason) => {
   console.error('Unhandled promise rejection:', reason);
 });
 
-interface Command {
-  data: { name: string };
-  execute: (interaction: ChatInputCommandInteraction) => Promise<void>;
-  autocomplete?: (interaction: AutocompleteInteraction) => Promise<void>;
-}
-
 const commands = new Collection<string, Command>();
-commands.set(ping.data.name, ping);
-commands.set(list.data.name, list);
-commands.set(watch.data.name, watch);
-commands.set(help.data.name, help);
-commands.set(seeks.data.name, seeks);
-commands.set(spectate.data.name, spectate);
-commands.set(announce.data.name, announce);
-commands.set(showbots.data.name, showbots);
-commands.set(rating.data.name, rating);
-commands.set(prune.data.name, prune);
-commands.set(expand.data.name, expand);
+for (const command of commandList) commands.set(command.data.name, command);
 
 client.once('ready', (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
@@ -146,7 +112,10 @@ client.on('interactionCreate', async (interaction) => {
     console.error('Error handling interaction:', err);
     // Best effort: if the interaction itself has expired, this reply fails
     // too, and that failure must not escape the catch block.
-    const errorReply = { content: 'Something went wrong running that command.', flags: MessageFlags.Ephemeral } as const;
+    const errorReply = {
+      content: 'Something went wrong running that command.',
+      flags: MessageFlags.Ephemeral,
+    } as const;
     try {
       if (interaction.isRepliable() && (interaction.replied || interaction.deferred)) {
         await interaction.followUp(errorReply);

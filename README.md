@@ -13,24 +13,24 @@ receives, and subscribes to a game's move stream when someone asks to watch it.
 
 ## Commands
 
-| Command | What it does |
-|---|---|
-| `/ping` | Health check with round-trip latency. |
-| `/list` | Lists games currently in progress. |
-| `/seeks` | Lists open public seeks. |
+| Command         | What it does                                                                                                                                                         |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/ping`         | Health check with round-trip latency.                                                                                                                                |
+| `/list`         | Lists games currently in progress.                                                                                                                                   |
+| `/seeks`        | Lists open public seeks.                                                                                                                                             |
 | `/watch <game>` | Follows a live game in a thread. Takes a game number or a partial player name, with autocomplete. `/spectate` is an alias. With no argument it behaves like `/list`. |
-| `/expand here` | Inside a game thread: attaches board images to any catch-up summaries that were posted without them. |
-| `/expand new` | Inside a game thread: builds a separate replay thread with one board per move, then mirrors the live game into it. |
-| `/help` | Describes every command. |
+| `/expand here`  | Inside a game thread: attaches board images to any catch-up summaries that were posted without them.                                                                 |
+| `/expand new`   | Inside a game thread: builds a separate replay thread with one board per move, then mirrors the live game into it.                                                   |
+| `/help`         | Describes every command.                                                                                                                                             |
 
 Moderator commands (default permission: Manage Channels):
 
-| Command | What it does |
-|---|---|
+| Command                                    | What it does                                                                                                                                                                                                                                                |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/announce on\|off\|quiet\|noguest\|users` | Keeps a live list of joinable human seeks in the channel, removing each as it is taken or cancelled, and posts a notice with a Watch button when one becomes a game. `quiet` suppresses game notices; `noguest` and `users` filter them. Survives restarts. |
-| `/showbots on\|off` | Whether games with a bot on either side get a game notice. |
-| `/rating human:<n> bot:<n>` | Only post game notices for games with a registered human rated at least `human`, against another human or a bot rated at least `bot`. Overrides `/showbots` and the announce filters (but not `quiet`). `/rating off` clears it. |
-| `/prune duplicates\|threads\|messages` | Removes the bot's own stale messages and threads: duplicate watch threads, threads and notices that no longer match the channel's settings, and day-old threads nobody chatted in. Live games are never touched. |
+| `/showbots on\|off`                        | Whether games with a bot on either side get a game notice.                                                                                                                                                                                                  |
+| `/rating human:<n> bot:<n>`                | Only post game notices for games with a registered human rated at least `human`, against another human or a bot rated at least `bot`. Overrides `/showbots` and the announce filters (but not `quiet`). `/rating off` clears it.                            |
+| `/prune duplicates\|threads\|messages`     | Removes the bot's own stale messages and threads: duplicate watch threads, threads and notices that no longer match the channel's settings, and day-old threads nobody chatted in. Live games are never touched.                                            |
 
 Stale notices and unused threads are also cleaned up automatically every
 30 minutes in every channel where `/announce` has been configured. A finished
@@ -47,9 +47,11 @@ Requires Node 22.
    - If the app is private, set Installation > Install Link to "None".
 
 2. **Install dependencies.**
+
    ```bash
    npm install
    ```
+
    Board rendering uses `tps-ninja`, which depends on the native `canvas`
    package. If npm blocks its install script, run
    `npm install-scripts approve canvas` and install again. Board images use
@@ -57,9 +59,11 @@ Requires Node 22.
    system default otherwise.
 
 3. **Configure the environment.**
+
    ```bash
    cp .env.example .env
    ```
+
    Fill in `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, and `DISCORD_GUILD_ID` (the
    server ID; right-click the server icon with Developer Mode on). Commands are
    registered to that one server, which makes changes show up instantly. A bot
@@ -75,6 +79,7 @@ Requires Node 22.
 
 5. **Register the slash commands.** Run this again whenever a command's name,
    description, or options change.
+
    ```bash
    npm run deploy-commands
    ```
@@ -103,8 +108,8 @@ rebuild, re-run `deploy-commands` if commands changed, and restart the process.
 
 To run two instances from one checkout (for example production and testing),
 give each its own env file and pass it as the first argument:
-`node dist/index.js .env.testing`. Per-instance state files in `data/` are
-namespaced by `DISCORD_GUILD_ID`.
+`node dist/index.js .env.testing`. Per-instance state files in `data/` (or
+`DATA_DIR`) are namespaced by `DISCORD_GUILD_ID`.
 
 ## Project structure
 
@@ -138,13 +143,16 @@ assets/                The bot's profile picture
 ## Development
 
 ```bash
+npm run check          # format check, build, and tests
 npm run build          # type-check and compile to dist/
+npm test               # unit tests (node:test, run through ts-node)
+npm run format         # apply Prettier
 npm run dev            # run from source with ts-node
 npm run set-avatar     # upload assets/watchtak-icon.png as the bot's avatar
 ```
 
-Keep secrets in `.env` (gitignored). The `data/` directory holds runtime state
-and is gitignored too.
+Keep secrets in `.env` (gitignored). Per-channel settings are stored as JSON
+files in `data/` (gitignored), or in `DATA_DIR` if set.
 
 ## License
 

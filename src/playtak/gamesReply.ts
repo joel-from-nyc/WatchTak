@@ -10,8 +10,10 @@ export function buildGamesListReply(): string {
   const lines = games.map((game) => {
     const minutes = Math.floor(game.timeSeconds / 60);
     const rated = game.unrated ? 'unrated' : 'rated';
-    return `#${game.gameNo} - **${game.white}** vs **${game.black}** ` +
-      `(${game.boardSize}x${game.boardSize}, ${minutes}+${game.incrementSeconds}, ${rated})`;
+    return (
+      `#${game.gameNo} - **${game.white}** vs **${game.black}** ` +
+      `(${game.boardSize}x${game.boardSize}, ${minutes}+${game.incrementSeconds}, ${rated})`
+    );
   });
 
   const maxLines = 20;
