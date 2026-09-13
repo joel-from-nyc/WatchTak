@@ -1,9 +1,8 @@
 import { PlaytakClient } from './client';
 import { Seek } from './protocol';
 
-// Tracks currently-open public seeks (excludes private challenges - see the
-// `opponent` field check) for on-demand /seeks lookups. No channel posting
-// or pruning - that was removed in favor of querying on demand.
+// In-memory view of open public seeks. Private challenges (a non-empty
+// `opponent`) are excluded.
 export class SeekRegistry {
   private seeks = new Map<number, Seek>();
 

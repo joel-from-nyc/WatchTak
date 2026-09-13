@@ -1,10 +1,9 @@
 import { SlashCommandBuilder } from 'discord.js';
 import { execute, autocomplete } from './watch';
 
-// Synonym for /watch - Discord doesn't support true command aliases, so
-// this is a separate registration sharing the same logic, autocomplete
-// included (an option's autocomplete is per-registration, so it has to be
-// declared here too rather than inherited).
+// Alias for /watch. Discord has no alias support, so this is a separate
+// registration sharing the same handlers. Autocomplete is declared per
+// registration, so the option is repeated here.
 export const data = new SlashCommandBuilder()
   .setName('spectate')
   .setDescription('Same as /watch - follow a live PlayTak game in a thread')

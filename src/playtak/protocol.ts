@@ -1,10 +1,7 @@
-// Parser for PlayTak's line-based WebSocket protocol.
-//
-// Field orders below are confirmed against the server source
-// (USTakAssociation/playtak-api, server/src/main/java/tak/{Seek,Game,Client}.java)
-// and cross-checked against live traffic captured with src/scripts/playtak-probe.ts.
-// Anything not confirmed either way (e.g. "Game Start", "Game# P"/"Game# M" move
-// encoding) is left as raw tokens rather than guessed at.
+// Parser for PlayTak's line-based WebSocket protocol. Field orders follow the
+// server source (USTakAssociation/playtak-api: Seek.java, Game.java,
+// Client.java). Lines this parser does not recognize are returned as
+// `unknown` rather than guessed at.
 
 export interface Seek {
   id: number;
@@ -20,14 +17,11 @@ export interface Seek {
   tournament: boolean;
   triggerMove: number;
   timeAmount: number;
-  // Normalized to '' when the seek is open to anyone. Protocol v1 sends an
-  // empty field for that case, v2 sends the literal "0" - both mean "no
-  // specific opponent", so both become '' here.
+  // '' when the seek is open to anyone. Protocol v1 sends an empty field for
+  // that, v2 sends "0"; both are normalized to ''.
   opponent: string;
-  // Only present when the server sent a protocol-v2 seek line (we ask for
-  // v2 at login - see client.ts). Undefined means "the server didn't tell
-  // us", not "human", so callers that care must check for `=== false`
-  // rather than falsiness.
+  // Only present on protocol-v2 seek lines. Undefined means the server did
+  // not say, not "human"; callers must check `=== false`.
   isBot?: boolean;
 }
 
@@ -48,7 +42,7 @@ export interface GameListEntry {
 }
 
 export interface PlaceMove {
-  // File+rank as sent on the wire, e.g. "A1" (uppercase file, per server regex).
+  // File+rank as sent on the wire, e.g. "A1".
   square: string;
   isCapstone: boolean;
   isWall: boolean;
@@ -84,11 +78,8 @@ export type PlaytakEvent =
   | { type: 'tell'; from: string; message: string }
   | { type: 'unknown'; raw: string };
 
-// Handles both protocol shapes: v1 ends at `opponent` (empty when open to
-// anyone), v2 sends "0" for that same case and appends a trailing bot flag.
-// We ask for v2, but a reconnect that somehow lands on v1 must still parse
-// rather than mangle every field - hence reading the flag positionally
-// instead of assuming it's there.
+// Handles both protocol versions: v1 ends at `opponent`, v2 appends a bot
+// flag. The flag is read positionally so a v1 line still parses.
 function parseSeekFields(tokens: string[]): Seek {
   const [
     id, player, boardSize, timeSeconds, incrementSeconds, color, komi,
@@ -181,8 +172,7 @@ export function parseLine(line: string): PlaytakEvent {
     return { type: 'observeAck', game: parseGameListFields(observeMatch[1].trim().split(' ')) };
   }
 
-  // Field shapes below match the server's own parsing regexes exactly
-  // (server/src/main/java/tak/Client.java: placePattern / movePattern).
+  // Move shapes match the server's own placePattern / movePattern.
   const placeMatch = /^Game#(\d+) P ([A-Z])(\d)( C)?( W)?$/.exec(line);
   if (placeMatch) {
     return {
@@ -209,11 +199,7 @@ export function parseLine(line: string): PlaytakEvent {
     };
   }
 
-  // Once we've sent `Protocol 2` (see client.ts), the server switches from
-  // seconds to milliseconds for time updates and renames the message to
-  // `Timems` - confirmed against live traffic while observing a game.
-  // Handling both keeps this correct even if the negotiated version ever
-  // changes back.
+  // Protocol v2 sends `Timems` in milliseconds; v1 sends `Time` in seconds.
   const gameTimeMsMatch = /^Game#(\d+) Timems (\d+) (\d+)$/.exec(line);
   if (gameTimeMsMatch) {
     return {

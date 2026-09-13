@@ -1,5 +1,5 @@
-// Smoke test for PlaytakClient: connect, log every typed event, confirm
-// nothing falls through to 'unknown' unexpectedly. Not wired into the bot.
+// Connects with PlaytakClient and logs every parsed event, to check that
+// nothing falls through to 'unknown'. Not used by the bot.
 //
 // Run with: npx ts-node src/scripts/playtak-client-probe.ts
 

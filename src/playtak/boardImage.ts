@@ -2,10 +2,8 @@
 import { PassThrough } from 'stream';
 import { PTNtoTPS, TPStoPNG } from 'tps-ninja';
 
-// Renders the current board position (from the full PTN move list) as a PNG
-// buffer. Passing a dummy PassThrough as tps-ninja's `streamTo` argument
-// prevents its default behavior of writing a file to disk as a side effect
-// (see TPStoPNG.js) - we only want the in-memory buffer.
+// Renders the position after `plies` as a PNG buffer, highlighting the last
+// ply. The PassThrough sink stops tps-ninja from writing a file to disk.
 export function renderBoardPng(
   boardSize: number,
   komi: number,
@@ -24,12 +22,8 @@ export function renderBoardPng(
       hl: lastPly,
       player1: white,
       player2: black,
-      // `theme`/`transparent`/`imageSize` fixed per feedback from tps-ninja's
-      // own author on how the library is meant to be embedded in a Discord
-      // message. `font` assumes Roboto is installed as a system font on the
-      // host running this bot (confirmed on the current Windows host) -
-      // would fall back silently to canvas's default font on a host without
-      // it, e.g. a future Linux/Docker deployment.
+      // `font` must be installed on the host; canvas falls back to its
+      // default font otherwise.
       theme: 'discord',
       transparent: true,
       imageSize: 'md',

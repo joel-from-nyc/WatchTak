@@ -2,18 +2,12 @@ import { ActivityType, Client } from 'discord.js';
 import { PlaytakClient } from './client';
 import { GameRegistry } from './registry';
 
-// Shows the live PlayTak game count under the bot's name ("Watching 4 games
-// on PlayTak"), straight from the registry that already backs /list - no
-// extra traffic to PlayTak for it.
-//
-// Refreshed on a timer rather than on every GameList event: games start and
-// end constantly, and every (re)connect replays the whole active list at
-// once, which would push presence updates far past the handful per minute
-// the gateway allows. A minute's lag on a cosmetic counter costs nothing.
+// Shows "Watching N games on PlayTak" as the bot's activity, from the game
+// registry. Refreshed on a timer rather than per GameList event, since
+// reconnect replays would exceed the gateway's presence rate limit.
 const PRESENCE_REFRESH_MS = 60 * 1000;
 
-// Long enough for the post-connect GameList replay to land, so the first
-// number shown is the real one rather than a partially-filled registry.
+// Lets the post-connect GameList replay land before the first update.
 const STARTUP_DELAY_MS = 5000;
 
 function activityName(gameCount: number): string {
@@ -22,9 +16,6 @@ function activityName(gameCount: number): string {
 
 export function registerPresence(playtak: PlaytakClient, discordClient: Client, registry: GameRegistry): void {
   const update = (): void => {
-    // setActivity throws if the client isn't logged in yet; it also only
-    // queues a gateway payload, so there's nothing to await or catch beyond
-    // that.
     if (!discordClient.user) return;
     discordClient.user.setActivity(activityName(registry.list().length), { type: ActivityType.Watching });
   };

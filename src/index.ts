@@ -27,10 +27,8 @@ import { startRatingsRefresh } from './playtak/ratings';
 import { registerAutoPrune } from './playtak/autoPrune';
 import { registerPresence } from './playtak/presence';
 
-// Which .env file to load - defaults to plain .env, but a specific instance
-// (e.g. `node dist/index.js .env.production`) can point at its own file, so
-// a single build can run more than one bot instance (different token,
-// guild, and channel) without needing a separate checkout per instance.
+// An optional first argument names the env file, so one build can run more
+// than one instance: `node dist/index.js .env.testing`.
 dotenv.config({ path: process.argv[2] ?? '.env' });
 
 const { DISCORD_TOKEN } = process.env;
@@ -39,17 +37,10 @@ if (!DISCORD_TOKEN) {
   throw new Error('DISCORD_TOKEN must be set in the env file (see package.json start scripts for which one)');
 }
 
-// Intents declare which events Discord will send us. Keep this list minimal -
-// request more only as you actually need them (e.g. GuildMembers, MessageContent).
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-// Neither of these should fire in normal operation, but each is a
-// process-killer if left unhandled: an 'error' the Client emits with no
-// listener is rethrown by Node, and an unhandled promise rejection
-// terminates the process outright. For an always-on service, logging and
-// carrying on is the right response to both - the service manager would
-// restart a crashed process anyway, but only after losing every in-memory
-// watch, mirror thread, and pending seek correlation along with it.
+// Both would otherwise terminate the process. For an always-on service,
+// logging and continuing keeps every in-memory watch alive.
 client.on('error', (err) => {
   console.error('Discord client error:', err);
 });
@@ -57,13 +48,9 @@ process.on('unhandledRejection', (reason) => {
   console.error('Unhandled promise rejection:', reason);
 });
 
-// A simple in-memory registry of commands, keyed by name, so the
-// interactionCreate handler below can look up and run the right one.
 interface Command {
   data: { name: string };
   execute: (interaction: ChatInputCommandInteraction) => Promise<void>;
-  // Only the commands with an autocompleting option define this - see
-  // watch.ts.
   autocomplete?: (interaction: AutocompleteInteraction) => Promise<void>;
 }
 
@@ -92,18 +79,15 @@ client.once('ready', (readyClient) => {
   startRatingsRefresh();
 });
 
-// customId shapes set by seekToGame.ts's game-started notice buttons -
-// "watch:<gameNo>" while the game is live, "watch-review:<gameNo>" once it's
-// finished. Both are lazy: nothing is created until someone actually clicks.
+// Button customIds set by seekToGame.ts: "watch:<gameNo>" while a game is
+// live, "watch-review:<gameNo>" once it has finished.
 const WATCH_BUTTON_PATTERN = /^watch:(\d+)$/;
 const REVIEW_BUTTON_PATTERN = /^watch-review:(\d+)$/;
 
 client.on('interactionCreate', async (interaction) => {
   try {
-    // Fires repeatedly while someone types an autocompleting option, and
-    // must be answered within 3 seconds. Handled before the command branch
-    // below because it is emitted as its own interaction type, not as a
-    // command invocation.
+    // Autocomplete arrives as its own interaction type and must be answered
+    // within 3 seconds.
     if (interaction.isAutocomplete()) {
       const command = commands.get(interaction.commandName);
       await command?.autocomplete?.(interaction);
@@ -160,13 +144,8 @@ client.on('interactionCreate', async (interaction) => {
     }
   } catch (err) {
     console.error('Error handling interaction:', err);
-    // Best-effort only. If the interaction itself is what failed - expired
-    // before it was acknowledged (Discord allows 3s), or otherwise unknown -
-    // this reply fails the same way, and that failure has to be swallowed
-    // here: thrown from inside a catch it escapes the handler, surfaces as
-    // an unhandled 'error' on the Client, and takes the whole process down,
-    // which is exactly how one slow /prune acknowledgement once crashed the
-    // bot.
+    // Best effort: if the interaction itself has expired, this reply fails
+    // too, and that failure must not escape the catch block.
     const errorReply = { content: 'Something went wrong running that command.', flags: MessageFlags.Ephemeral } as const;
     try {
       if (interaction.isRepliable() && (interaction.replied || interaction.deferred)) {
@@ -180,20 +159,10 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// Deletes each announce-enabled channel's "now on" confirmation message
-// before exiting - it's stale the instant the bot goes down. The toggle
-// state itself is left alone; resumeAnnouncing() picks it back up on the
-// next start. Only covers a graceful stop (Ctrl+C, a process manager's
-// SIGTERM) - a crash or `kill -9` skips this, but that's fine, since
-// resumeAnnouncing() cleans up the stale message on the next startup
-// regardless of how the previous run ended.
-//
-// The cleanup is best-effort and hard-capped: every step in it is a Discord
-// REST call, and a hung or unreachable API (or a channel the bot has lost
-// access to) would otherwise leave the process alive forever with the
-// service manager stuck in STOP_PENDING - which is exactly what used to
-// happen. Exiting without the cleanup is harmless; resumeAnnouncing() sweeps
-// the stale message on the next start regardless of how this run ended.
+// On a graceful stop, deletes each announcing channel's "now on" message
+// (stale once the bot is down). The persisted toggle state is kept and
+// resumed on the next start. Cleanup is capped so a hung Discord API call
+// can never keep the process from exiting.
 const SHUTDOWN_TIMEOUT_MS = 4000;
 
 let shuttingDown = false;
@@ -202,17 +171,13 @@ async function shutdown(signal: string) {
   shuttingDown = true;
   console.log(`Received ${signal}, shutting down...`);
 
-  // Outer backstop covering everything below, client.destroy() included -
-  // so it is deliberately never cleared; process.exit(0) at the end of a
-  // normal shutdown gets there first. unref() so the timer itself is never
-  // what holds the process open.
+  // Outer backstop for everything below, client.destroy() included.
   setTimeout(() => {
     console.error(`Shutdown did not finish within ${SHUTDOWN_TIMEOUT_MS}ms - exiting anyway.`);
     process.exit(0);
   }, SHUTDOWN_TIMEOUT_MS).unref();
 
-  // Inner cap on just the cleanup, set below the outer one so a hung
-  // announcer still leaves room for client.destroy() to run.
+  // Inner cap on the cleanup alone, leaving room for client.destroy().
   try {
     await Promise.race([
       shutdownAnnouncer(client),
