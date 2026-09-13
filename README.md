@@ -113,6 +113,8 @@ give each its own env file and pass it as the first argument:
 
 ## Project structure
 
+How the pieces fit together is described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ```
 src/
   index.ts             Entry point: Discord login, command dispatch, button handlers, shutdown
