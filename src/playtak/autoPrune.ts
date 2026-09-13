@@ -1,5 +1,5 @@
 import { Client, ThreadChannel, Message, DiscordAPIError, RESTJSONErrorCodes } from 'discord.js';
-import { PlaytakClient } from './client';
+import { getPlaytakClient } from './shared';
 import { loadAnnounceState } from './announceStore';
 import { fetchTextChannel, isTrackedSeekMessage } from './announcer';
 import { isTrackedGameMessage } from './seekToGame';
@@ -127,8 +127,8 @@ async function runAutoPrune(discordClient: Client): Promise<void> {
   }
 }
 
-export function registerAutoPrune(playtak: PlaytakClient, discordClient: Client): void {
-  playtak.once('connected', () => {
+export function registerAutoPrune(discordClient: Client): void {
+  getPlaytakClient().once('connected', () => {
     setTimeout(() => {
       const run = () => runAutoPrune(discordClient).catch((err) => console.error('Auto-prune run failed:', err));
       run();

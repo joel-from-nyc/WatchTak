@@ -35,7 +35,7 @@ console.log(`Using ${envFile} - setting avatar from ${imagePath}`);
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-client.once('ready', async (readyClient) => {
+client.once('clientReady', async (readyClient) => {
   try {
     const updated = await readyClient.user.setAvatar(imagePath);
     console.log(`Avatar updated for ${updated.tag}: ${updated.displayAvatarURL({ size: 512 })}`);

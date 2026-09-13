@@ -126,7 +126,10 @@ src/
     seekRegistry.ts    Live in-memory view of open seeks
     ratings.ts         Player ratings, polled from playtak.com's rating list
     gameArchive.ts     Finished games, fetched from PlayTak's public archive
-    watcher.ts         Watch-a-game lifecycle: threads, live moves, reconnects, close/archive
+    watcher.ts         Watch-a-game lifecycle: threads, live moves, reconnects, sweep
+    lowTime.ts         Low-time countdown warnings
+    threadClose.ts     24h close/archive lifecycle for finished game threads
+    threadLookup.ts    Finding a game's thread and reading back what it shows
     catchup.ts         Catch-up summary messages that /expand fills with boards
     announcer.ts       /announce: live seek list per channel
     seekToGame.ts      Correlates a removed seek with the game it became

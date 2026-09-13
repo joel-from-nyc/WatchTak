@@ -1,6 +1,6 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client } from 'discord.js';
-import { PlaytakClient } from './client';
 import { GameListEntry, Seek } from './protocol';
+import { getPlaytakClient } from './shared';
 import { fetchTextChannel, listAnnouncingChannelIds, isGameNoticeAllowed, notePostOutcome } from './announcer';
 import { getWatchedThread } from './watcher';
 import { formatPlayerBold } from './ratings';
@@ -252,7 +252,8 @@ function notifyGameAdded(discordClient: Client, game: GameListEntry): void {
   pendingGames.push(entry);
 }
 
-export function registerSeekToGame(playtak: PlaytakClient, discordClient: Client): void {
+export function registerSeekToGame(discordClient: Client): void {
+  const playtak = getPlaytakClient();
   playtak.on('connected', () => {
     replayingUntil = Date.now() + REPLAY_SETTLE_MS;
   });

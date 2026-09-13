@@ -1,6 +1,5 @@
 import { ActivityType, Client } from 'discord.js';
-import { PlaytakClient } from './client';
-import { GameRegistry } from './registry';
+import { getPlaytakClient, getGameRegistry } from './shared';
 
 // Shows "Watching N games on PlayTak" as the bot's activity, from the game
 // registry. Refreshed on a timer rather than per GameList event, since
@@ -14,13 +13,14 @@ function activityName(gameCount: number): string {
   return `${gameCount} game${gameCount === 1 ? '' : 's'} on PlayTak`;
 }
 
-export function registerPresence(playtak: PlaytakClient, discordClient: Client, registry: GameRegistry): void {
+export function registerPresence(discordClient: Client): void {
+  const registry = getGameRegistry();
   const update = (): void => {
     if (!discordClient.user) return;
     discordClient.user.setActivity(activityName(registry.list().length), { type: ActivityType.Watching });
   };
 
-  playtak.once('connected', () => {
+  getPlaytakClient().once('connected', () => {
     setTimeout(() => {
       update();
       setInterval(update, PRESENCE_REFRESH_MS);

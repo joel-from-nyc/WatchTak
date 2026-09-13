@@ -9,7 +9,8 @@ import {
 } from 'discord.js';
 import { wouldGameNoticeBeAllowed, isTrackedSeekMessage } from '../playtak/announcer';
 import { isTrackedGameMessage } from '../playtak/seekToGame';
-import { isGameActivelyWatched, getWatchedThread, parseThreadName } from '../playtak/watcher';
+import { isGameActivelyWatched, getWatchedThread } from '../playtak/watcher';
+import { parseThreadName } from '../playtak/threadLookup';
 import { areRatingsLoaded } from '../playtak/ratings';
 import { parseReplayThreadName } from '../playtak/catchup';
 import { loadAnnounceState } from '../playtak/announceStore';

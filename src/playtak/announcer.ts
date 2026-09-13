@@ -1,7 +1,6 @@
 import { Client, TextChannel } from 'discord.js';
-import { PlaytakClient } from './client';
 import { GameListEntry, Seek } from './protocol';
-import { getSeekRegistry } from './shared';
+import { getPlaytakClient, getSeekRegistry } from './shared';
 import {
   AnnounceMode,
   loadAnnounceState,
@@ -389,7 +388,8 @@ export async function shutdownAnnouncer(discordClient: Client): Promise<void> {
   }
 }
 
-export function registerAnnouncer(playtak: PlaytakClient, discordClient: Client): void {
+export function registerAnnouncer(discordClient: Client): void {
+  const playtak = getPlaytakClient();
   playtak.on('event', async (event) => {
     if (event.type !== 'seekNew' && event.type !== 'seekRemove') return;
 

@@ -1,5 +1,6 @@
 import { TextChannel, ThreadChannel, Message, MessageType, ComponentType } from 'discord.js';
-import { isGameActivelyWatched, parseThreadName } from './watcher';
+import { isGameActivelyWatched } from './watcher';
+import { parseThreadName } from './threadLookup';
 import { parseReplayThreadName } from './catchup';
 import { getGameRegistry } from './shared';
 
