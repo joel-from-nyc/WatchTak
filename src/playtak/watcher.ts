@@ -6,7 +6,15 @@ import { placeToPtn, spreadToPtn, moveLabelToPly } from './ptn';
 import { renderBoardPng } from './boardImage';
 import { describeResult } from './result';
 import { buildPtnNinjaLink } from './ptnLink';
-import { formatGameType, formatKomi, formatPlayerName, discordTime, formatDuration, codeBlock, alignedLine } from './format';
+import {
+  formatGameType,
+  formatKomi,
+  formatPlayerName,
+  discordTime,
+  formatDuration,
+  codeBlock,
+  alignedLine,
+} from './format';
 import {
   buildChunkContents,
   moveOnlyText,
@@ -173,10 +181,7 @@ function moveText(state: WatchState, ply: number, ptn: string): string {
   const isWhite = ply % 2 === 0;
   const moveNumber = Math.floor(ply / 2) + 1;
   const colorLetter = isWhite ? 'W' : 'B';
-  const lines = [
-    alignedLine('Move', `${moveNumber}${colorLetter}. ${ptn}`, MOVE_LABEL_WIDTH),
-    ...timeLines(state),
-  ];
+  const lines = [alignedLine('Move', `${moveNumber}${colorLetter}. ${ptn}`, MOVE_LABEL_WIDTH), ...timeLines(state)];
   return codeBlock(lines);
 }
 
@@ -264,7 +269,12 @@ function staleWarningText(state: WatchState, color: 'white' | 'black', afterMove
 // If the warning was resolved while the send was in flight - the generation
 // moved on - the new message is edited straight to its final text, since
 // nothing else will ever resolve it.
-async function postLowTimeWarning(state: WatchState, isWhite: boolean, flagAtMs: number, generation: number): Promise<void> {
+async function postLowTimeWarning(
+  state: WatchState,
+  isWhite: boolean,
+  flagAtMs: number,
+  generation: number,
+): Promise<void> {
   if (state.lowTimeWarning) return;
 
   const player = isWhite ? state.white : state.black;
@@ -376,7 +386,13 @@ function armSettleTimer(state: WatchState): void {
           // A replay thread always gets board-per-move.
           if (state.mirrorThread) {
             for (let k = fromPly; k < state.plies.length; k++) {
-              const png = renderBoardPng(state.boardSize, state.komi, state.plies.slice(0, k + 1), state.white, state.black);
+              const png = renderBoardPng(
+                state.boardSize,
+                state.komi,
+                state.plies.slice(0, k + 1),
+                state.white,
+                state.black,
+              );
               await mirrorSend(state, moveOnlyText(k, state.plies[k]), png);
             }
           }
@@ -447,6 +463,9 @@ async function reconcileClose(thread: ThreadChannel, marker: CloseMarker): Promi
 }
 
 async function handleGameEnd(playtak: PlaytakClient, state: WatchState, resultText: string): Promise<void> {
+  // A settle timer still pending would post a board after the game-over.
+  if (state.settleTimer) clearTimeout(state.settleTimer);
+  state.settleTimer = undefined;
   const ptnLink = buildPtnNinjaLink(state.gameNo);
   // No move ended the game, so no increment was credited: show the raw clock.
   await resolveLowTimeWarning(state, false);
@@ -696,7 +715,10 @@ export async function watchGame(
 
 // Builds a thread for a finished game from PlayTak's archive. Never sends
 // Observe or arms timers. Returns undefined if the archive has no record.
-export async function reconstructThread(parentChannel: TextChannel, gameNo: number): Promise<ThreadChannel | undefined> {
+export async function reconstructThread(
+  parentChannel: TextChannel,
+  gameNo: number,
+): Promise<ThreadChannel | undefined> {
   const inFlight = inFlightReconstructs.get(gameNo);
   if (inFlight) return inFlight;
 
@@ -709,7 +731,10 @@ export async function reconstructThread(parentChannel: TextChannel, gameNo: numb
   }
 }
 
-async function createReconstructedThread(parentChannel: TextChannel, gameNo: number): Promise<ThreadChannel | undefined> {
+async function createReconstructedThread(
+  parentChannel: TextChannel,
+  gameNo: number,
+): Promise<ThreadChannel | undefined> {
   // A finished game's thread is likely archived, so archived threads are
   // searched too.
   const botId = parentChannel.client.user?.id;
@@ -881,7 +906,11 @@ async function resumeWatchingThread(playtak: PlaytakClient, thread: ThreadChanne
 // - Game still active but not watched: resume watching it.
 // - Game over: post the close warning if there is none, otherwise let
 //   reconcileClose() close it when due or keep its deadline current.
-export async function sweepThreads(discordClient: Client, playtak: PlaytakClient, registry: GameRegistry): Promise<void> {
+export async function sweepThreads(
+  discordClient: Client,
+  playtak: PlaytakClient,
+  registry: GameRegistry,
+): Promise<void> {
   const botId = discordClient.user?.id;
   if (!botId) return;
 

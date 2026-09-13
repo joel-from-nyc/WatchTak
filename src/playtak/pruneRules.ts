@@ -25,7 +25,8 @@ function buttonGameNo(message: Message): number | undefined {
   for (const row of message.components) {
     if (row.type !== ComponentType.ActionRow) continue;
     for (const component of row.components) {
-      const match = 'customId' in component && component.customId ? NOTICE_BUTTON_PATTERN.exec(component.customId) : null;
+      const match =
+        'customId' in component && component.customId ? NOTICE_BUTTON_PATTERN.exec(component.customId) : null;
       if (match) return Number(match[1]);
     }
   }
@@ -113,7 +114,9 @@ export async function threadHasHumanMessages(thread: ThreadChannel): Promise<boo
 // The channel's active threads plus up to MAX_THREAD_PAGES of archived ones.
 // `complete` is false if any fetch failed or the archived list was cut off,
 // in which case "not found" cannot be trusted to mean "does not exist".
-export async function collectChannelThreads(channel: TextChannel): Promise<{ threads: ThreadChannel[]; complete: boolean }> {
+export async function collectChannelThreads(
+  channel: TextChannel,
+): Promise<{ threads: ThreadChannel[]; complete: boolean }> {
   const threads: ThreadChannel[] = [];
   let complete = true;
 

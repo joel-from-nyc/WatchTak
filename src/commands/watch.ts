@@ -109,7 +109,10 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     // Swap the public placeholder for a private link, so repeat requests for
     // a popular game do not clutter the channel.
     await interaction.deleteReply().catch(() => {});
-    await interaction.followUp({ content: `This game already has a thread. Spectate: ${thread}`, flags: MessageFlags.Ephemeral });
+    await interaction.followUp({
+      content: `This game already has a thread. Spectate: ${thread}`,
+      flags: MessageFlags.Ephemeral,
+    });
     return;
   }
 

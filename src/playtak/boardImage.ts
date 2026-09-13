@@ -4,13 +4,7 @@ import { PTNtoTPS, TPStoPNG } from 'tps-ninja';
 
 // Renders the position after `plies` as a PNG buffer, highlighting the last
 // ply. The PassThrough sink stops tps-ninja from writing a file to disk.
-export function renderBoardPng(
-  boardSize: number,
-  komi: number,
-  plies: string[],
-  white: string,
-  black: string,
-): Buffer {
+export function renderBoardPng(boardSize: number, komi: number, plies: string[], white: string, black: string): Buffer {
   const tps = PTNtoTPS({ size: boardSize, plies });
   const lastPly = plies[plies.length - 1];
   const sink = new PassThrough();

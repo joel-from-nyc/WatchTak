@@ -31,16 +31,14 @@ export const data = new SlashCommandBuilder()
   .setName('prune')
   .setDescription("Clean up old bot messages/threads that no longer match this channel's current rules")
   .addSubcommand((sub) =>
-    sub.setName('duplicates').setDescription('Collapse duplicate watch threads for the same game (skips ones with human chat)'),
-  )
-  .addSubcommand((sub) =>
     sub
-      .setName('threads')
-      .setDescription('Remove stale/rule-mismatched watch threads (live games untouched)'),
+      .setName('duplicates')
+      .setDescription('Collapse duplicate watch threads for the same game (skips ones with human chat)'),
   )
   .addSubcommand((sub) =>
-    sub.setName('messages').setDescription('Remove stale/rule-mismatched channel messages'),
+    sub.setName('threads').setDescription('Remove stale/rule-mismatched watch threads (live games untouched)'),
   )
+  .addSubcommand((sub) => sub.setName('messages').setDescription('Remove stale/rule-mismatched channel messages'))
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels);
 
 // Commands whose replies are ephemeral. Any public reply to one of these
@@ -166,7 +164,8 @@ async function pruneMessages(interaction: ChatInputCommandInteraction, channel: 
           // Every /announce reply except the tracked banner. Day-old, so a
           // banner posted during this scan is not caught.
           if (commandName === 'announce') {
-            const outdated = message.id !== trackedConfirmationId && Date.now() - message.createdTimestamp > STALE_AGE_MS;
+            const outdated =
+              message.id !== trackedConfirmationId && Date.now() - message.createdTimestamp > STALE_AGE_MS;
             if (outdated) doomed.push(message);
             continue;
           }

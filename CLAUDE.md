@@ -33,6 +33,8 @@ file covers what an agent or contributor needs to change it safely.
 - `ratings.ts` polls `https://playtak.com/ratinglist.json` every 20 minutes.
   The wire protocol carries no ratings. A rating of 0 means unrated. The
   list's bot flag supplements bot detection from seek lines.
+- Pure modules (`protocol.ts`, `ptn.ts`, `format.ts`, `catchup.ts`,
+  `result.ts`, `jsonStore.ts`) have `*.test.ts` files beside them.
 - `gameArchive.ts` fetches finished games from
   `https://api.playtak.com/v1/games-history/:id` for Review threads and
   `/expand` on finished games. Move tokens match the live wire format.
@@ -41,17 +43,18 @@ file covers what an agent or contributor needs to change it safely.
   one-at-a-time for messages over two weeks old or when Manage Messages is
   missing.
 - `announceStore.ts`, `showBotsStore.ts`, `ratingStore.ts` persist per-channel
-  settings as JSON files in `data/`, namespaced by `DISCORD_GUILD_ID`.
+  settings through `jsonStore.ts`: one JSON file each in `data/` (or
+  `DATA_DIR`), namespaced by `DISCORD_GUILD_ID`, written atomically.
 - `boardImage.ts` renders boards with `tps-ninja` (native `canvas`). Wire komi
   is in half-points; divide by 2 before rendering.
 
 ## Conventions
 
-- Strict TypeScript (`tsconfig.json`). Don't loosen it. Run `npm run build`
-  after any change.
+- Strict TypeScript (`tsconfig.json`). Don't loosen it. Run `npm run check`
+  (Prettier, build, tests) after any change.
 - One command per file in `src/commands/`, exporting `data` and `execute`
-  (and `autocomplete` where an option autocompletes). Register new commands
-  in both `src/index.ts` and `src/deploy-commands.ts`.
+  (and `autocomplete` where an option autocompletes). Add new commands to
+  the list in `src/commands/index.ts`; that both routes and registers them.
 - Aliases are separate command files reusing the primary's `execute`
   (`spectate.ts`). Autocomplete must be declared on each registration.
 - Command descriptions are capped at 100 characters by Discord. Keep them

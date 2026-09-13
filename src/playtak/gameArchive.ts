@@ -23,6 +23,8 @@ export interface ArchivedGame {
 
 // Archive move tokens use the live wire format without the "Game#<no> "
 // prefix, comma-separated.
+const FETCH_TIMEOUT_MS = 10_000;
+
 const PLACE_TOKEN = /^P ([A-Z])(\d)( C)?( W)?$/;
 const SPREAD_TOKEN = /^M ([A-Z])(\d) ([A-Z])(\d)((?: \d+)+)$/;
 
@@ -72,7 +74,9 @@ interface ArchiveResponse {
 // token cannot be parsed.
 export async function fetchArchivedGame(gameNo: number): Promise<ArchivedGame | undefined> {
   try {
-    const response = await fetch(`https://api.playtak.com/v1/games-history/${gameNo}`);
+    const response = await fetch(`https://api.playtak.com/v1/games-history/${gameNo}`, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
     if (!response.ok) return undefined;
 
     const body: ArchiveResponse | null = await response.json();

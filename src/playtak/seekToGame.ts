@@ -77,19 +77,14 @@ async function deleteRefs(discordClient: Client, refs: SeekMessageRef[]): Promis
 
 // "X vs Y (#123) has started!" plus a viewer-local start timestamp.
 function startedContent(game: GameListEntry): string {
-  const headline =
-    `${formatPlayerBold(game.white)} vs ${formatPlayerBold(game.black)} (#${game.gameNo}) has started!`;
+  const headline = `${formatPlayerBold(game.white)} vs ${formatPlayerBold(game.black)} (#${game.gameNo}) has started!`;
   const startedAt = getGameStartedAt(game.gameNo);
   return startedAt === undefined ? headline : `${headline}\nStarted ${discordTime(startedAt)}`;
 }
 
 // Edits the seek's announcement into the game-started notice, reusing the
 // same message slot.
-async function convertToGameNotice(
-  discordClient: Client,
-  game: GameListEntry,
-  refs: SeekMessageRef[],
-): Promise<void> {
+async function convertToGameNotice(discordClient: Client, game: GameListEntry, refs: SeekMessageRef[]): Promise<void> {
   const content = startedContent(game);
   const landed: SeekMessageRef[] = [];
 
@@ -175,8 +170,7 @@ async function retireGameNotice(discordClient: Client, gameNo: number): Promise<
     startedAt === undefined
       ? `Ended ${discordTime(endedAt)}`
       : `Ended ${discordTime(endedAt)} · lasted ${formatDuration(endedAt - startedAt)}`;
-  const content =
-    `${formatPlayerBold(notice.white)} vs ${formatPlayerBold(notice.black)} (#${gameNo}) has finished.\n${timeLine}`;
+  const content = `${formatPlayerBold(notice.white)} vs ${formatPlayerBold(notice.black)} (#${gameNo}) has finished.\n${timeLine}`;
   for (const ref of notice.refs) {
     const channel = await fetchTextChannel(discordClient, ref.channelId);
     if (!channel) continue;

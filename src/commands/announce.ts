@@ -13,7 +13,7 @@ const MODE_MESSAGES: Record<AnnounceMode, string> = {
   on:
     'Seek announcements are now **on** in this channel. ' +
     "I'll keep a live list here of open seeks posted by humans (bot seeks are skipped), " +
-    'removing each one as it gets taken or cancelled. I\'ll also post a notice with a Watch button whenever one of ' +
+    "removing each one as it gets taken or cancelled. I'll also post a notice with a Watch button whenever one of " +
     'those seeks (or a private challenge, like a rematch) turns into a live game. This stays on across restarts.',
   quiet:
     'Seek announcements are now **on (quiet)** in this channel. ' +

@@ -22,7 +22,11 @@
     "set-avatar": "ts-node src/scripts/set-avatar.ts",
     "start": "node dist/index.js",
     "start:production": "node dist/index.js .env.production",
-    "start:testing": "node dist/index.js .env.testing"
+    "start:testing": "node dist/index.js .env.testing",
+    "test": "node -r ts-node/register --test \"src/**/*.test.ts\"",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run format:check && npm run build && npm test"
   },
   "dependencies": {
     "discord.js": "^14.16.3",
@@ -33,6 +37,7 @@
   "devDependencies": {
     "@types/node": "^22.9.0",
     "@types/ws": "^8.18.1",
+    "prettier": "^3.9.6",
     "ts-node": "^10.9.2",
     "typescript": "^5.6.3"
   },

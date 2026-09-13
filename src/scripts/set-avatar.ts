@@ -27,7 +27,7 @@ const extension = path.extname(imagePath).toLowerCase();
 if (!ACCEPTED_EXTENSIONS.includes(extension)) {
   throw new Error(
     `Discord won't accept a ${extension || '(no extension)'} avatar - use one of ${ACCEPTED_EXTENSIONS.join(', ')}. ` +
-      'A WebP has to be converted to PNG first; see this file\'s header.',
+      "A WebP has to be converted to PNG first; see this file's header.",
   );
 }
 

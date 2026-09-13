@@ -82,8 +82,20 @@ export type PlaytakEvent =
 // flag. The flag is read positionally so a v1 line still parses.
 function parseSeekFields(tokens: string[]): Seek {
   const [
-    id, player, boardSize, timeSeconds, incrementSeconds, color, komi,
-    pieces, capstones, unrated, tournament, triggerMove, timeAmount, opponent,
+    id,
+    player,
+    boardSize,
+    timeSeconds,
+    incrementSeconds,
+    color,
+    komi,
+    pieces,
+    capstones,
+    unrated,
+    tournament,
+    triggerMove,
+    timeAmount,
+    opponent,
     botFlag,
   ] = tokens;
   return {
@@ -107,8 +119,19 @@ function parseSeekFields(tokens: string[]): Seek {
 
 function parseGameListFields(tokens: string[]): GameListEntry {
   const [
-    gameNo, white, black, boardSize, timeSeconds, incrementSeconds, komi,
-    pieces, capstones, unrated, tournament, triggerMove, timeAmount,
+    gameNo,
+    white,
+    black,
+    boardSize,
+    timeSeconds,
+    incrementSeconds,
+    komi,
+    pieces,
+    capstones,
+    unrated,
+    tournament,
+    triggerMove,
+    timeAmount,
   ] = tokens;
   return {
     gameNo: Number(gameNo),
