@@ -91,6 +91,11 @@ game-started notice. The protocol carries no link between a seek and the
 game it becomes, so a removed seek and a new game naming the same player
 within 5 seconds are treated as the same event, in either order. The notice
 carries a Watch button, swapped for a Review button when the game ends.
+Notices are tracked in memory only. After each reconnect's replay, a tracked
+notice whose game did not come back is retired; after a restart, notices
+still showing a Watch button are read back from channel history and either
+tracked again or retired. A notice retired late shows its start time instead
+of an end time, which PlayTak does not provide.
 
 Which games get a notice is decided per channel by `modeAllowsGame()` in
 `announcer.ts`, from the `/announce` mode, `/showbots`, and any `/rating`

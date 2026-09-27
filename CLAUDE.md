@@ -27,6 +27,9 @@ together. This file is only what an agent needs to change the code safely.
 - Comments describe what the code does and any non-obvious fact it relies
   on. No design rationale or history.
 - Secrets live in `.env` (gitignored). Never print or commit token values.
+- The version in `package.json` (and `package-lock.json`) has four
+  segments. Bump the last one for each change or build; only the maintainer
+  bumps the others.
 
 ## Constraints
 

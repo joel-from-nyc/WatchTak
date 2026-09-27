@@ -45,6 +45,13 @@ export function discordTime(atMs: number, style: 'f' | 'R' | 't' = 'f'): string 
   return `<t:${Math.floor(atMs / 1000)}:${style}>`;
 }
 
+// Reverses discordTime(): epoch milliseconds from a whole `<t:UNIX>` or
+// `<t:UNIX:style>` tag, or undefined if `text` is not exactly one tag.
+export function parseDiscordTime(text: string): number | undefined {
+  const match = /^<t:(\d+)(?::[tTdDfFR])?>$/.exec(text);
+  return match ? Number(match[1]) * 1000 : undefined;
+}
+
 // "9:05" from a clock value in seconds.
 export function formatSeconds(totalSeconds: number): string {
   const clamped = Math.max(0, Math.round(totalSeconds));
