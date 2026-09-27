@@ -1,6 +1,6 @@
 {
   "name": "watchtak",
-  "version": "0.1.0.1",
+  "version": "0.1.0.2",
   "description": "A Discord bot for following PlayTak games",
   "private": true,
   "license": "MIT",
