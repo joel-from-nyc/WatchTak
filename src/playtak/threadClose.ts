@@ -52,26 +52,25 @@ export async function findCloseMarker(thread: ThreadChannel): Promise<CloseMarke
   };
 }
 
-// Archives and locks the thread, then rewrites the close marker to record
-// when that happened. Archive and lock go in one edit so a message cannot
-// land between them and reopen the thread. Locking needs Manage Threads;
-// if the combined edit is refused, archive alone. Safe to call repeatedly.
+// Rewrites the close marker to record the close, then archives and locks the
+// thread. The marker goes first because Discord refuses edits to messages in
+// an archived thread. If the archive then fails, the next sweep finds the
+// rewritten marker overdue and retries. Archive and lock go in one edit so a
+// message cannot land between them and reopen the thread. Locking needs
+// Manage Threads; if the combined edit is refused, archive alone. Safe to
+// call repeatedly.
 async function closeThread(thread: ThreadChannel, marker: CloseMarker | undefined): Promise<void> {
-  const archived = await thread
-    .edit({ archived: true, locked: true })
-    .then(() => true)
-    .catch(async (err) => {
-      console.error(`Failed to archive+lock thread ${thread.id}, trying archive alone:`, err);
-      return thread
-        .setArchived(true)
-        .then(() => true)
-        .catch((fallbackErr) => {
-          console.error(`Failed to archive thread ${thread.id}:`, fallbackErr);
-          return false;
-        });
+  if (marker && !marker.alreadyArchived) {
+    await marker.message
+      .edit(`${CLOSE_ARCHIVED_PREFIX} <t:${Math.floor(Date.now() / 1000)}:D>.`)
+      .catch((err) => console.error(`Failed to rewrite close marker in thread ${thread.id}:`, err));
+  }
+  await thread.edit({ archived: true, locked: true }).catch(async (err) => {
+    console.error(`Failed to archive+lock thread ${thread.id}, trying archive alone:`, err);
+    await thread.setArchived(true).catch((fallbackErr) => {
+      console.error(`Failed to archive thread ${thread.id}:`, fallbackErr);
     });
-  if (!archived || !marker || marker.alreadyArchived) return;
-  await marker.message.edit(`${CLOSE_ARCHIVED_PREFIX} <t:${Math.floor(Date.now() / 1000)}:D>.`).catch(() => {});
+  });
 }
 
 // Runs reconcileClose() at `atMs`. The marker is re-read at that point rather
