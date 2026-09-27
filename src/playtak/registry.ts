@@ -12,6 +12,8 @@ export class GameRegistry {
   // Set while a post-connect replay window is open: game numbers seen
   // during the window.
   private seenDuringReplay?: Set<number>;
+  private reconcileTimer?: NodeJS.Timeout;
+  private reconciledListeners: (() => void)[] = [];
 
   constructor(playtak: PlaytakClient) {
     playtak.on('event', (event) => {
@@ -28,14 +30,30 @@ export class GameRegistry {
     playtak.on('connected', () => {
       const knownBeforeReplay = new Set(this.games.keys());
       this.seenDuringReplay = new Set();
-      setTimeout(() => {
+      this.reconcileTimer = setTimeout(() => {
+        this.reconcileTimer = undefined;
         const seen = this.seenDuringReplay ?? new Set();
         this.seenDuringReplay = undefined;
         for (const gameNo of knownBeforeReplay) {
           if (!seen.has(gameNo)) this.games.delete(gameNo);
         }
+        for (const listener of this.reconciledListeners) listener();
       }, RECONNECT_RECONCILE_MS);
     });
+
+    // A connection lost inside the window may not have delivered the whole
+    // replay, so nothing is dropped; the next connect's replay reconciles.
+    playtak.on('disconnected', () => {
+      clearTimeout(this.reconcileTimer);
+      this.reconcileTimer = undefined;
+      this.seenDuringReplay = undefined;
+    });
+  }
+
+  // Called after every (re)connect once the replay has landed and games that
+  // ended while disconnected have been dropped, including the first connect.
+  onReconciled(listener: () => void): void {
+    this.reconciledListeners.push(listener);
   }
 
   list(): GameListEntry[] {

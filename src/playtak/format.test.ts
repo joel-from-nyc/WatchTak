@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatKomi, formatDuration, alignedLine, formatPlayerName, formatPlayerNameBold, discordTime } from './format';
+import {
+  formatKomi,
+  formatDuration,
+  alignedLine,
+  formatPlayerName,
+  formatPlayerNameBold,
+  discordTime,
+  parseDiscordTime,
+} from './format';
 
 test('formatKomi converts wire half-points', () => {
   assert.equal(formatKomi(0), '0');
@@ -32,4 +40,11 @@ test('player names with and without ratings', () => {
 test('discordTime emits a unix-seconds tag', () => {
   assert.equal(discordTime(1_700_000_000_500), '<t:1700000000:f>');
   assert.equal(discordTime(1_700_000_000_000, 'R'), '<t:1700000000:R>');
+});
+
+test('parseDiscordTime reverses discordTime to the second', () => {
+  assert.equal(parseDiscordTime(discordTime(1_700_000_000_500)), 1_700_000_000_000);
+  assert.equal(parseDiscordTime('<t:1700000000>'), 1_700_000_000_000);
+  assert.equal(parseDiscordTime('<t:1700000000:R> ago'), undefined);
+  assert.equal(parseDiscordTime('Started <t:1700000000:f>'), undefined);
 });
